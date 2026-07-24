@@ -945,6 +945,18 @@ impl AndroidWindow {
         state.renderer.as_ref().map(|r| r.gpu_specs())
     }
 
+    /// Returns the exact wgpu context used by this window's renderer.
+    ///
+    /// Video textures must be created on this device before they can be
+    /// submitted to GPUI's `surface()` element.
+    pub fn gpu_context_handle(&self) -> Option<gpui::WgpuContextHandle> {
+        let state = self.state.lock();
+        state
+            .renderer
+            .as_ref()
+            .and_then(WgpuRenderer::gpu_context_handle)
+    }
+
     /// Whether the window is currently active / visible.
     pub fn is_active(&self) -> bool {
         self.active.load(std::sync::atomic::Ordering::Relaxed)
@@ -1841,6 +1853,10 @@ impl PlatformWindow for AndroidPlatformWindow {
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         self.window.gpu_specs()
+    }
+
+    fn gpu_context(&self) -> Option<gpui::WgpuContextHandle> {
+        self.window.gpu_context_handle()
     }
 
     fn update_ime_position(&self, bounds: gpui::Bounds<gpui::Pixels>) {

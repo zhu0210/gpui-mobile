@@ -19,7 +19,11 @@ use super::{Router, BLUE, GREEN, MAUVE};
 /// Render the Apple Liquid Glass showcase screen.
 pub fn render_apple_glass(router: &Router) -> impl IntoElement {
     let dark = router.dark_mode;
-    let sub_text: u32 = if dark { super::SUBTEXT } else { super::LIGHT_SUBTEXT };
+    let sub_text: u32 = if dark {
+        super::SUBTEXT
+    } else {
+        super::LIGHT_SUBTEXT
+    };
 
     div()
         .flex()
@@ -91,7 +95,11 @@ pub fn render_apple_glass(router: &Router) -> impl IntoElement {
 /// Render the Material Design 3 showcase screen.
 pub fn render_material(router: &Router) -> impl IntoElement {
     let dark = router.dark_mode;
-    let sub_text: u32 = if dark { super::SUBTEXT } else { super::LIGHT_SUBTEXT };
+    let sub_text: u32 = if dark {
+        super::SUBTEXT
+    } else {
+        super::LIGHT_SUBTEXT
+    };
 
     div()
         .flex()

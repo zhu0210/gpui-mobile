@@ -149,10 +149,17 @@ struct NsLogLogger;
 
 #[cfg(target_os = "ios")]
 impl log::Log for NsLogLogger {
-    fn enabled(&self, _metadata: &log::Metadata) -> bool { true }
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        true
+    }
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
-            let msg = format!("[{}] {}: {}", record.level(), record.target(), record.args());
+            let msg = format!(
+                "[{}] {}: {}",
+                record.level(),
+                record.target(),
+                record.args()
+            );
             nslog(&msg);
         }
     }
@@ -165,7 +172,9 @@ fn nslog(msg: &str) {
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
     unsafe {
-        extern "C" { fn NSLog(fmt: *mut AnyObject, ...); }
+        extern "C" {
+            fn NSLog(fmt: *mut AnyObject, ...);
+        }
         let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
         let ns_msg: *mut AnyObject = msg_send![class!(NSString), alloc];
         let ns_msg: *mut AnyObject = msg_send![ns_msg, initWithUTF8String: c_msg.as_ptr()];

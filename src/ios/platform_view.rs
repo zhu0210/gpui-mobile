@@ -88,7 +88,6 @@ impl IosPlatformView {
             );
 
             let view: *mut AnyObject = match view_type {
-                "video_player" => Self::create_video_player_view(frame, params)?,
                 "webview" => Self::create_webview_view(frame, params)?,
                 "camera_preview" => Self::create_camera_preview_view(frame, params)?,
                 _ => Self::create_generic_view(frame)?,
@@ -125,46 +124,6 @@ impl IosPlatformView {
         }
         let clear_color: *mut AnyObject = msg_send![class!(UIColor), clearColor];
         let _: () = msg_send![view, setBackgroundColor: clear_color];
-        Ok(view)
-    }
-
-    /// Create a UIView with an AVPlayerLayer for video playback.
-    #[cfg(target_os = "ios")]
-    unsafe fn create_video_player_view(
-        frame: ObjcCGRect,
-        params: &PlatformViewParams,
-    ) -> Result<*mut AnyObject, String> {
-        // Create a container UIView
-        let uiview_class = class!(UIView);
-        let view: *mut AnyObject = msg_send![uiview_class, alloc];
-        let view: *mut AnyObject = msg_send![view, initWithFrame: frame];
-        if view.is_null() {
-            return Err("Failed to create UIView for video_player".into());
-        }
-
-        let black_color: *mut AnyObject = msg_send![class!(UIColor), blackColor];
-        let _: () = msg_send![view, setBackgroundColor: black_color];
-
-        // If a player_id is provided, try to get the AVPlayer and create AVPlayerLayer
-        if let Some(player_id_str) = params.creation_params.get("player_id") {
-            if let Ok(player_id) = player_id_str.parse::<u32>() {
-                // Get AVPlayer from the video_player package's PLAYERS map
-                if let Some(player_ptr) = crate::packages::video_player::ios_get_player(player_id) {
-                    let player_layer: *mut AnyObject =
-                        msg_send![class!(AVPlayerLayer), playerLayerWithPlayer: player_ptr];
-                    if !player_layer.is_null() {
-                        let _: () = msg_send![player_layer, setFrame: frame];
-                        // Set video gravity to aspect fit
-                        let gravity = Self::make_nsstring("AVLayerVideoGravityResizeAspect");
-                        let _: () = msg_send![player_layer, setVideoGravity: gravity];
-                        let _: () = msg_send![gravity, release];
-                        let view_layer: *mut AnyObject = msg_send![view, layer];
-                        let _: () = msg_send![view_layer, addSublayer: player_layer];
-                    }
-                }
-            }
-        }
-
         Ok(view)
     }
 

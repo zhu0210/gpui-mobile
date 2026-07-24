@@ -11,6 +11,7 @@ import android.util.Log;
 import android.view.KeyEvent;
 
 import androidx.core.splashscreen.SplashScreen;
+import com.luminavideo.bridge.LuminaVideo;
 
 /**
  * Custom Activity extending NativeActivity that integrates with the
@@ -71,6 +72,10 @@ public class GpuiActivity extends NativeActivity {
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
         super.onCreate(savedInstanceState);
+
+        // Initialize ExoPlayer/MediaCodec before Rust can construct a
+        // lumina-video decoder from the GPUI event loop.
+        LuminaVideo.init(this);
     }
 
     /**
@@ -128,6 +133,7 @@ public class GpuiActivity extends NativeActivity {
     protected void onDestroy() {
         // Release media session when activity is destroyed.
         GpuiMediaSession.release();
+        LuminaVideo.shutdown();
         super.onDestroy();
     }
 

@@ -1134,6 +1134,8 @@ impl Platform for AndroidPlatform {
         });
     }
 
+    fn on_system_wake(&self, _callback: Box<dyn FnMut()>) {}
+
     fn set_menus(&self, _menus: Vec<Menu>, _keymap: &Keymap) {
         // No-op: Android doesn't have macOS-style menus.
     }
@@ -1181,6 +1183,12 @@ impl Platform for AndroidPlatform {
 
     fn set_cursor_style(&self, _style: CursorStyle) {
         // No-op: Android uses touch, not mouse cursors.
+    }
+
+    fn hide_cursor_until_mouse_moves(&self) {}
+
+    fn is_cursor_visible(&self) -> bool {
+        false
     }
 
     fn should_auto_hide_scrollbars(&self) -> bool {
@@ -1378,6 +1386,9 @@ impl Platform for SharedPlatform {
     fn on_reopen(&self, callback: Box<dyn FnMut()>) {
         <AndroidPlatform as Platform>::on_reopen(&self.0, callback)
     }
+    fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
+        <AndroidPlatform as Platform>::on_system_wake(&self.0, callback)
+    }
     fn set_menus(&self, menus: Vec<Menu>, keymap: &Keymap) {
         <AndroidPlatform as Platform>::set_menus(&self.0, menus, keymap)
     }
@@ -1407,6 +1418,12 @@ impl Platform for SharedPlatform {
     }
     fn set_cursor_style(&self, style: CursorStyle) {
         <AndroidPlatform as Platform>::set_cursor_style(&self.0, style)
+    }
+    fn hide_cursor_until_mouse_moves(&self) {
+        <AndroidPlatform as Platform>::hide_cursor_until_mouse_moves(&self.0)
+    }
+    fn is_cursor_visible(&self) -> bool {
+        <AndroidPlatform as Platform>::is_cursor_visible(&self.0)
     }
     fn should_auto_hide_scrollbars(&self) -> bool {
         <AndroidPlatform as Platform>::should_auto_hide_scrollbars(&self.0)

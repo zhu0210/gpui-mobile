@@ -17,14 +17,62 @@ const SWIPE_THRESHOLD: f32 = 100.0;
 
 /// Demo profile cards.
 const PROFILES: &[Profile] = &[
-    Profile { name: "Alex", age: 28, bio: "Coffee enthusiast. Hiking on weekends.", color: 0xE91E63, photo_id: 1027 },
-    Profile { name: "Jordan", age: 25, bio: "Photographer & world traveler.", color: 0x9C27B0, photo_id: 1025 },
-    Profile { name: "Casey", age: 31, bio: "Software engineer. Cat person.", color: 0x3F51B5, photo_id: 1005 },
-    Profile { name: "Morgan", age: 27, bio: "Yoga instructor. Plant parent.", color: 0x009688, photo_id: 1011 },
-    Profile { name: "Riley", age: 24, bio: "Music producer. Night owl.", color: 0xFF9800, photo_id: 1012 },
-    Profile { name: "Taylor", age: 29, bio: "Chef by day, gamer by night.", color: 0x795548, photo_id: 1015 },
-    Profile { name: "Quinn", age: 26, bio: "Surfer. Beach lover. Dog dad.", color: 0x00BCD4, photo_id: 1039 },
-    Profile { name: "Avery", age: 30, bio: "Startup founder. Marathon runner.", color: 0x4CAF50, photo_id: 1074 },
+    Profile {
+        name: "Alex",
+        age: 28,
+        bio: "Coffee enthusiast. Hiking on weekends.",
+        color: 0xE91E63,
+        photo_id: 1027,
+    },
+    Profile {
+        name: "Jordan",
+        age: 25,
+        bio: "Photographer & world traveler.",
+        color: 0x9C27B0,
+        photo_id: 1025,
+    },
+    Profile {
+        name: "Casey",
+        age: 31,
+        bio: "Software engineer. Cat person.",
+        color: 0x3F51B5,
+        photo_id: 1005,
+    },
+    Profile {
+        name: "Morgan",
+        age: 27,
+        bio: "Yoga instructor. Plant parent.",
+        color: 0x009688,
+        photo_id: 1011,
+    },
+    Profile {
+        name: "Riley",
+        age: 24,
+        bio: "Music producer. Night owl.",
+        color: 0xFF9800,
+        photo_id: 1012,
+    },
+    Profile {
+        name: "Taylor",
+        age: 29,
+        bio: "Chef by day, gamer by night.",
+        color: 0x795548,
+        photo_id: 1015,
+    },
+    Profile {
+        name: "Quinn",
+        age: 26,
+        bio: "Surfer. Beach lover. Dog dad.",
+        color: 0x00BCD4,
+        photo_id: 1039,
+    },
+    Profile {
+        name: "Avery",
+        age: 30,
+        bio: "Startup founder. Marathon runner.",
+        color: 0x4CAF50,
+        photo_id: 1074,
+    },
 ];
 
 struct Profile {
@@ -120,10 +168,7 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
     let stack_end = (idx + 3).min(PROFILES.len());
     let visible = &PROFILES[idx..stack_end];
 
-    let mut stack = div()
-        .w(px(320.0))
-        .h(px(420.0))
-        .relative();
+    let mut stack = div().w(px(320.0)).h(px(420.0)).relative();
 
     for (i, profile) in visible.iter().enumerate().rev() {
         let is_top = i == 0;
@@ -160,22 +205,15 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                     .border_3()
                     .border_color(rgb(label_color))
                     .opacity(opacity)
-                    .child(
-                        div()
-                            .text_xl()
-                            .text_color(rgb(label_color))
-                            .child(label),
-                    ),
+                    .child(div().text_xl().text_color(rgb(label_color)).child(label)),
             )
         } else {
             None
         };
 
         // Picsum photo URL
-        let photo_url: gpui::SharedString = format!(
-            "https://picsum.photos/id/{}/640/840",
-            profile.photo_id
-        ).into();
+        let photo_url: gpui::SharedString =
+            format!("https://picsum.photos/id/{}/640/840", profile.photo_id).into();
 
         let card = div()
             .absolute()
@@ -190,17 +228,12 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
             .flex_col()
             // Background image from picsum.photos
             .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .child(
-                        img(photo_url)
-                            .size_full()
-                            .object_fit(gpui::ObjectFit::Cover)
-                            .id(format!("swiper-img-{}", idx + i)),
-                    ),
+                div().absolute().top_0().left_0().size_full().child(
+                    img(photo_url)
+                        .size_full()
+                        .object_fit(gpui::ObjectFit::Cover)
+                        .id(format!("swiper-img-{}", idx + i)),
+                ),
             )
             .child(div().flex_1())
             // Profile info overlay at bottom
@@ -242,20 +275,17 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
         // Apply fly-off animation to the top card
         if is_top && is_flying {
             let fly = fly_dir;
-            stack = stack.child(
-                card.with_animation(
-                    format!("swipe-fly-{anim_id}"),
-                    Animation::new(Duration::from_millis(300))
-                        .with_easing(gpui::ease_in_out),
-                    move |el, delta| {
-                        // Fly off screen: 0→400px in the swipe direction
-                        let offset = delta * 400.0 * fly;
-                        let opacity = 1.0 - delta;
-                        el.left(px(offset + (1.0 - base_scale) * 160.0))
-                            .opacity(opacity)
-                    },
-                ),
-            );
+            stack = stack.child(card.with_animation(
+                format!("swipe-fly-{anim_id}"),
+                Animation::new(Duration::from_millis(300)).with_easing(gpui::ease_in_out),
+                move |el, delta| {
+                    // Fly off screen: 0→400px in the swipe direction
+                    let offset = delta * 400.0 * fly;
+                    let opacity = 1.0 - delta;
+                    el.left(px(offset + (1.0 - base_scale) * 160.0))
+                        .opacity(opacity)
+                },
+            ));
         } else {
             stack = stack.child(card);
         }
@@ -279,15 +309,17 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                     cx.notify();
                 }),
             )
-            .on_mouse_move(cx.listener(|_this, event: &gpui::MouseMoveEvent, _window, cx| {
-                SWIPER_STATE.with(|s| {
-                    let mut s = s.borrow_mut();
-                    if let Some(start_x) = s.drag_start_x {
-                        s.drag_x = event.position.x.as_f32() - start_x;
-                    }
-                });
-                cx.notify();
-            }))
+            .on_mouse_move(
+                cx.listener(|_this, event: &gpui::MouseMoveEvent, _window, cx| {
+                    SWIPER_STATE.with(|s| {
+                        let mut s = s.borrow_mut();
+                        if let Some(start_x) = s.drag_start_x {
+                            s.drag_x = event.position.x.as_f32() - start_x;
+                        }
+                    });
+                    cx.notify();
+                }),
+            )
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|_this, _event: &gpui::MouseUpEvent, _window, cx| {
@@ -300,7 +332,11 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                                 // Trigger fly-off animation
                                 s.fly_direction = if s.drag_x > 0.0 { 1.0 } else { -1.0 };
                                 s.anim_id += 1;
-                                let direction = if s.fly_direction > 0.0 { "LIKED" } else { "NOPED" };
+                                let direction = if s.fly_direction > 0.0 {
+                                    "LIKED"
+                                } else {
+                                    "NOPED"
+                                };
                                 if s.index < PROFILES.len() {
                                     log::info!("Swiper: {} {}", direction, PROFILES[s.index].name);
                                 }
@@ -328,7 +364,8 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                                 });
                                 cx.notify();
                             });
-                        }).detach();
+                        })
+                        .detach();
                     }
                     cx.notify();
                 }),
@@ -344,68 +381,82 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
             .flex_row()
             .gap_6()
             .mt_4()
-            .child(action_btn("X", RED, cx.listener(|_this, _, _, cx| {
-                let should_fly = SWIPER_STATE.with(|s| {
-                    let mut s = s.borrow_mut();
-                    if s.index < PROFILES.len() && s.fly_direction == 0.0 {
-                        log::info!("Swiper: NOPED {}", PROFILES[s.index].name);
-                        s.fly_direction = -1.0;
-                        s.anim_id += 1;
-                        s.drag_x = 0.0;
-                        return true;
-                    }
-                    false
-                });
-                if should_fly {
-                    cx.spawn(async |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(320))
-                            .await;
-                        let _ = this.update(cx, |_this, cx| {
-                            SWIPER_STATE.with(|s| {
-                                let mut s = s.borrow_mut();
-                                s.index += 1;
-                                s.fly_direction = 0.0;
+            .child(action_btn(
+                "X",
+                RED,
+                cx.listener(|_this, _, _, cx| {
+                    let should_fly = SWIPER_STATE.with(|s| {
+                        let mut s = s.borrow_mut();
+                        if s.index < PROFILES.len() && s.fly_direction == 0.0 {
+                            log::info!("Swiper: NOPED {}", PROFILES[s.index].name);
+                            s.fly_direction = -1.0;
+                            s.anim_id += 1;
+                            s.drag_x = 0.0;
+                            return true;
+                        }
+                        false
+                    });
+                    if should_fly {
+                        cx.spawn(async |this, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(320))
+                                .await;
+                            let _ = this.update(cx, |_this, cx| {
+                                SWIPER_STATE.with(|s| {
+                                    let mut s = s.borrow_mut();
+                                    s.index += 1;
+                                    s.fly_direction = 0.0;
+                                });
+                                cx.notify();
                             });
-                            cx.notify();
-                        });
-                    }).detach();
-                }
-                cx.notify();
-            })))
-            .child(action_btn("*", YELLOW, cx.listener(|_this, _, _, cx| {
-                log::info!("Swiper: SUPERLIKED");
-                cx.notify();
-            })))
-            .child(action_btn("~", GREEN, cx.listener(|_this, _, _, cx| {
-                let should_fly = SWIPER_STATE.with(|s| {
-                    let mut s = s.borrow_mut();
-                    if s.index < PROFILES.len() && s.fly_direction == 0.0 {
-                        log::info!("Swiper: LIKED {}", PROFILES[s.index].name);
-                        s.fly_direction = 1.0;
-                        s.anim_id += 1;
-                        s.drag_x = 0.0;
-                        return true;
+                        })
+                        .detach();
                     }
-                    false
-                });
-                if should_fly {
-                    cx.spawn(async |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(320))
-                            .await;
-                        let _ = this.update(cx, |_this, cx| {
-                            SWIPER_STATE.with(|s| {
-                                let mut s = s.borrow_mut();
-                                s.index += 1;
-                                s.fly_direction = 0.0;
+                    cx.notify();
+                }),
+            ))
+            .child(action_btn(
+                "*",
+                YELLOW,
+                cx.listener(|_this, _, _, cx| {
+                    log::info!("Swiper: SUPERLIKED");
+                    cx.notify();
+                }),
+            ))
+            .child(action_btn(
+                "~",
+                GREEN,
+                cx.listener(|_this, _, _, cx| {
+                    let should_fly = SWIPER_STATE.with(|s| {
+                        let mut s = s.borrow_mut();
+                        if s.index < PROFILES.len() && s.fly_direction == 0.0 {
+                            log::info!("Swiper: LIKED {}", PROFILES[s.index].name);
+                            s.fly_direction = 1.0;
+                            s.anim_id += 1;
+                            s.drag_x = 0.0;
+                            return true;
+                        }
+                        false
+                    });
+                    if should_fly {
+                        cx.spawn(async |this, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(320))
+                                .await;
+                            let _ = this.update(cx, |_this, cx| {
+                                SWIPER_STATE.with(|s| {
+                                    let mut s = s.borrow_mut();
+                                    s.index += 1;
+                                    s.fly_direction = 0.0;
+                                });
+                                cx.notify();
                             });
-                            cx.notify();
-                        });
-                    }).detach();
-                }
-                cx.notify();
-            }))),
+                        })
+                        .detach();
+                    }
+                    cx.notify();
+                }),
+            )),
     );
 
     root

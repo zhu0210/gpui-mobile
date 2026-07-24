@@ -21,3 +21,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "GPUIMobileExample"
 include(":app")
+include(":lumina-video-bridge")
+project(":lumina-video-bridge").projectDir =
+    file("../../../../lumina-video-gpui/android/lumina-video-bridge")

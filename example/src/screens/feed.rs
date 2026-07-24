@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use gpui::{div, img, prelude::*, px, rgb};
 
-use super::{Router, LIGHT_CARD_BG, LIGHT_TEXT, RED, SURFACE0, SURFACE1, TEXT, SUBTEXT, LIGHT_SUBTEXT};
+use super::{
+    Router, LIGHT_CARD_BG, LIGHT_SUBTEXT, LIGHT_TEXT, RED, SUBTEXT, SURFACE0, SURFACE1, TEXT,
+};
 
 /// Pull distance (px) to trigger refresh.
 const REFRESH_THRESHOLD: f32 = 80.0;
@@ -145,21 +147,23 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                 cx.notify();
             }),
         )
-        .on_mouse_move(cx.listener(|_this, event: &gpui::MouseMoveEvent, _window, cx| {
-            FEED_STATE.with(|s| {
-                let mut s = s.borrow_mut();
-                if let Some(start_y) = s.pull_start_y {
-                    let delta = event.position.y.as_f32() - start_y;
-                    // Only allow downward pull (positive delta) with diminishing return
-                    s.pull_distance = if delta > 0.0 {
-                        delta * 0.5 // Rubber-band effect
-                    } else {
-                        0.0
-                    };
-                }
-            });
-            cx.notify();
-        }))
+        .on_mouse_move(
+            cx.listener(|_this, event: &gpui::MouseMoveEvent, _window, cx| {
+                FEED_STATE.with(|s| {
+                    let mut s = s.borrow_mut();
+                    if let Some(start_y) = s.pull_start_y {
+                        let delta = event.position.y.as_f32() - start_y;
+                        // Only allow downward pull (positive delta) with diminishing return
+                        s.pull_distance = if delta > 0.0 {
+                            delta * 0.5 // Rubber-band effect
+                        } else {
+                            0.0
+                        };
+                    }
+                });
+                cx.notify();
+            }),
+        )
         .on_mouse_up(
             gpui::MouseButton::Left,
             cx.listener(|_this, _, _, cx| {
@@ -191,7 +195,8 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                             });
                             cx.notify();
                         });
-                    }).detach();
+                    })
+                    .detach();
                 }
                 cx.notify();
             }),
@@ -199,8 +204,16 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
 
     // ── Pull-to-refresh indicator ──────────────────────────────────
     if pull_distance > 10.0 || refreshing {
-        let indicator_opacity = if refreshing { 1.0 } else { (pull_distance / REFRESH_THRESHOLD).min(1.0) };
-        let indicator_height = if refreshing { 60.0 } else { pull_distance.min(100.0) };
+        let indicator_opacity = if refreshing {
+            1.0
+        } else {
+            (pull_distance / REFRESH_THRESHOLD).min(1.0)
+        };
+        let indicator_height = if refreshing {
+            60.0
+        } else {
+            pull_distance.min(100.0)
+        };
 
         feed = feed.child(
             div()
@@ -215,7 +228,13 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                     div()
                         .text_lg()
                         .text_color(rgb(sub_text))
-                        .child(if refreshing { "Refreshing..." } else if pull_distance > REFRESH_THRESHOLD { "Release to refresh" } else { "Pull to refresh" }),
+                        .child(if refreshing {
+                            "Refreshing..."
+                        } else if pull_distance > REFRESH_THRESHOLD {
+                            "Release to refresh"
+                        } else {
+                            "Pull to refresh"
+                        }),
                 )
                 .when(refreshing, |d| {
                     d.child(
@@ -257,21 +276,23 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                                 .items_center()
                                 .justify_center()
                                 .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(0xFFFFFF))
-                                        .child(post.username.chars().next().unwrap_or('?').to_uppercase().to_string()),
+                                    div().text_sm().text_color(rgb(0xFFFFFF)).child(
+                                        post.username
+                                            .chars()
+                                            .next()
+                                            .unwrap_or('?')
+                                            .to_uppercase()
+                                            .to_string(),
+                                    ),
                                 ),
                         )
                         .child(
-                            div()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(text_color))
-                                        .child(post.username.to_string()),
-                                ),
+                            div().flex_1().child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(text_color))
+                                    .child(post.username.to_string()),
+                            ),
                         )
                         .child(
                             div()
@@ -282,21 +303,15 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                 )
                 // Image area — picsum.photos with colored fallback
                 .child({
-                    let photo_url: gpui::SharedString = format!(
-                        "https://picsum.photos/id/{}/800/640",
-                        post.photo_id
-                    ).into();
-                    div()
-                        .w_full()
-                        .h(px(320.0))
-                        .bg(rgb(post.image_color))
-                        .child(
-                            img(photo_url)
-                                .w_full()
-                                .h(px(320.0))
-                                .object_fit(gpui::ObjectFit::Cover)
-                                .id(format!("feed-img-{}", i)),
-                        )
+                    let photo_url: gpui::SharedString =
+                        format!("https://picsum.photos/id/{}/800/640", post.photo_id).into();
+                    div().w_full().h(px(320.0)).bg(rgb(post.image_color)).child(
+                        img(photo_url)
+                            .w_full()
+                            .h(px(320.0))
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .id(format!("feed-img-{}", i)),
+                    )
                 })
                 // Action buttons row
                 .child(
@@ -324,73 +339,50 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                                     }),
                                 )
                         })
-                        .child(
-                            div()
-                                .text_xl()
-                                .text_color(rgb(text_color))
-                                .child("💬"),
-                        )
-                        .child(
-                            div()
-                                .text_xl()
-                                .text_color(rgb(text_color))
-                                .child("↗"),
-                        )
+                        .child(div().text_xl().text_color(rgb(text_color)).child("💬"))
+                        .child(div().text_xl().text_color(rgb(text_color)).child("↗"))
                         // Spacer
                         .child(div().flex_1())
-                        .child(
-                            div()
-                                .text_xl()
-                                .text_color(rgb(text_color))
-                                .child("🔖"),
-                        ),
+                        .child(div().text_xl().text_color(rgb(text_color)).child("🔖")),
                 )
                 // Like count
                 .child(
-                    div()
-                        .px_3()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(text_color))
-                                .child(format!("{} likes", format_count(like_count))),
-                        ),
+                    div().px_3().child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(text_color))
+                            .child(format!("{} likes", format_count(like_count))),
+                    ),
                 )
                 // Caption
                 .child(
-                    div()
-                        .px_3()
-                        .pb_2()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(text_color))
-                                        .child(post.username.to_string()),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(sub_text))
-                                        .child(post.caption.to_string()),
-                                ),
-                        ),
+                    div().px_3().pb_2().child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(text_color))
+                                    .child(post.username.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(sub_text))
+                                    .child(post.caption.to_string()),
+                            ),
+                    ),
                 )
                 // Comments link
                 .child(
-                    div()
-                        .px_3()
-                        .pb_3()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(sub_text))
-                                .child(format!("View all {} comments", post.comments)),
-                        ),
+                    div().px_3().pb_3().child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(sub_text))
+                            .child(format!("View all {} comments", post.comments)),
+                    ),
                 )
                 // Divider
                 .child(div().w_full().h(px(1.0)).bg(rgb(divider))),

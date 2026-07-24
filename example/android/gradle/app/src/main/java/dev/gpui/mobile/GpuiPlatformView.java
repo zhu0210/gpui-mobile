@@ -174,9 +174,6 @@ public class GpuiPlatformView {
                 frame.setBackgroundColor(0x00000000);
                 return frame;
 
-            case "video_player":
-                return createVideoPlayerView(activity, params);
-
             case "webview":
                 return createWebViewView(activity, params);
 
@@ -193,20 +190,6 @@ public class GpuiPlatformView {
                 Log.w(TAG, "Unknown view type: " + viewType + ", creating empty container");
                 return new FrameLayout(activity);
         }
-    }
-
-    /**
-     * Create a TextureView for video playback and wire it to the MediaPlayer.
-     */
-    private static View createVideoPlayerView(Activity activity, Map<String, String> params) {
-        int playerId = 0;
-        try {
-            playerId = Integer.parseInt(params.getOrDefault("player_id", "0"));
-        } catch (NumberFormatException e) {
-            Log.w(TAG, "Invalid player_id in creation params");
-        }
-
-        return GpuiVideoPlayer.createVideoSurface(activity, playerId);
     }
 
     /**

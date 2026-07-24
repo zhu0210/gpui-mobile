@@ -19,7 +19,7 @@ plugins {
 
 android {
     namespace = "dev.gpui.mobile.example"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "dev.gpui.mobile.example"
@@ -94,6 +94,8 @@ android {
 }
 
 dependencies {
+    // ExoPlayer/MediaCodec -> AHardwareBuffer JNI bridge used by lumina-video.
+    implementation(project(":lumina-video-bridge"))
     // AndroidX core for NotificationCompat (used by GpuiNotifications)
     implementation("androidx.core:core:1.12.0")
     // AndroidX SplashScreen compat (used by GpuiActivity to hold splash until native init)
