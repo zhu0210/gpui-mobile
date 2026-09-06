@@ -113,7 +113,7 @@ jobs:
 
       - name: Resolve NDK path
         run: |
-          sdkmanager "ndk;29.0.14206865"
+          sdkmanager "ndk;29.0.14206865" "platforms;android-37.2"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
       - name: Install cargo-ndk
@@ -161,7 +161,7 @@ jobs:
 
       - name: Resolve NDK path
         run: |
-          sdkmanager "ndk;29.0.14206865"
+          sdkmanager "ndk;29.0.14206865" "platforms;android-37.2"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
       - name: Set up JDK 17

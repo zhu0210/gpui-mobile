@@ -19,7 +19,9 @@ plugins {
 
 android {
     namespace = "dev.gpui.mobile.example"
-    compileSdk = 36
+    compileSdk {
+        version = release(37) { minorApiLevel = 2 }
+    }
 
     defaultConfig {
         applicationId = "dev.gpui.mobile.example"
