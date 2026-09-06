@@ -7,14 +7,29 @@ use gpui::{div, prelude::*, px, rgb};
 use gpui_mobile::packages::audio::{AudioPlayer, LoopMode, PlayerState};
 use gpui_mobile::packages::media_session;
 
-use super::{Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_SUBTEXT, LIGHT_TEXT, MAUVE, RED, SURFACE0, SUBTEXT, TEXT, YELLOW};
+use super::{
+    Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_SUBTEXT, LIGHT_TEXT, MAUVE, RED, SUBTEXT, SURFACE0,
+    TEXT, YELLOW,
+};
 
 /// Sample audio tracks for demo.
 const TRACKS: &[(&str, &str)] = &[
-    ("Chill Beat", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"),
-    ("Acoustic", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3"),
-    ("Electronica", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3"),
-    ("Jazz Vibes", "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3"),
+    (
+        "Chill Beat",
+        "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+    ),
+    (
+        "Acoustic",
+        "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
+    ),
+    (
+        "Electronica",
+        "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3",
+    ),
+    (
+        "Jazz Vibes",
+        "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3",
+    ),
 ];
 
 pub(crate) struct AudioState {
@@ -95,30 +110,42 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
     let sub_text = if dark { SUBTEXT } else { LIGHT_SUBTEXT };
     let card_bg = if dark { SURFACE0 } else { LIGHT_CARD_BG };
 
-    let (position_ms, duration_ms, volume, speed, loop_mode_idx, current_track, loading, error, _has_player, player_state_str) =
-        AUDIO_STATE.with(|s| {
-            let st = s.borrow();
-            let ps = st.player.as_ref()
-                .and_then(|p| p.state().ok())
-                .unwrap_or(PlayerState::Idle);
-            let lm = match st.loop_mode {
-                LoopMode::Off => 0u8,
-                LoopMode::One => 1,
-                LoopMode::All => 2,
-            };
-            (
-                st.position_ms,
-                st.duration_ms,
-                st.volume,
-                st.speed,
-                lm,
-                st.current_track,
-                st.loading,
-                st.error.clone(),
-                st.player.is_some(),
-                player_state_label(&ps).to_string(),
-            )
-        });
+    let (
+        position_ms,
+        duration_ms,
+        volume,
+        speed,
+        loop_mode_idx,
+        current_track,
+        loading,
+        error,
+        _has_player,
+        player_state_str,
+    ) = AUDIO_STATE.with(|s| {
+        let st = s.borrow();
+        let ps = st
+            .player
+            .as_ref()
+            .and_then(|p| p.state().ok())
+            .unwrap_or(PlayerState::Idle);
+        let lm = match st.loop_mode {
+            LoopMode::Off => 0u8,
+            LoopMode::One => 1,
+            LoopMode::All => 2,
+        };
+        (
+            st.position_ms,
+            st.duration_ms,
+            st.volume,
+            st.speed,
+            lm,
+            st.current_track,
+            st.loading,
+            st.error.clone(),
+            st.player.is_some(),
+            player_state_label(&ps).to_string(),
+        )
+    });
 
     let is_playing = player_state_str == "Playing";
     let progress = if duration_ms > 0 {
@@ -172,12 +199,7 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                                 .child(name.to_string()),
                         )
                         .when(is_current, |d| {
-                            d.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(BLUE))
-                                    .child("NOW"),
-                            )
+                            d.child(div().text_xs().text_color(rgb(BLUE)).child("NOW"))
                         })
                         .on_mouse_down(
                             gpui::MouseButton::Left,
@@ -223,7 +245,11 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                             div()
                                 .text_xs()
                                 .text_color(rgb(if loading { YELLOW } else { sub_text }))
-                                .child(if loading { "Loading...".to_string() } else { player_state_str.clone() }),
+                                .child(if loading {
+                                    "Loading...".to_string()
+                                } else {
+                                    player_state_str.clone()
+                                }),
                         ),
                 )
                 // Progress bar
@@ -243,7 +269,7 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                                         .h(px(4.0))
                                         .rounded_full()
                                         .bg(rgb(BLUE))
-                                        .w(px(progress * 300.0)),  // approximate width
+                                        .w(px(progress * 300.0)), // approximate width
                                 ),
                         )
                         .child(
@@ -284,7 +310,11 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                                     cx.listener(|_this, _, _, cx| {
                                         let prev = AUDIO_STATE.with(|s| {
                                             let st = s.borrow();
-                                            if st.current_track == 0 { TRACKS.len() - 1 } else { st.current_track - 1 }
+                                            if st.current_track == 0 {
+                                                TRACKS.len() - 1
+                                            } else {
+                                                st.current_track - 1
+                                            }
                                         });
                                         load_track(prev, cx);
                                     }),
@@ -354,7 +384,8 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                                         AUDIO_STATE.with(|s| {
                                             let st = s.borrow();
                                             if let Some(ref p) = st.player {
-                                                let pos = (st.position_ms + 10_000).min(st.duration_ms);
+                                                let pos =
+                                                    (st.position_ms + 10_000).min(st.duration_ms);
                                                 let _ = p.seek(pos);
                                             }
                                         });
@@ -382,28 +413,24 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                 )
                 // Stop button
                 .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(RED))
-                                .child("⏹ Stop")
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(|_this, _, _, cx| {
-                                        AUDIO_STATE.with(|s| {
-                                            let st = s.borrow();
-                                            if let Some(ref p) = st.player {
-                                                let _ = p.stop();
-                                            }
-                                        });
-                                        cx.notify();
-                                    }),
-                                ),
-                        ),
+                    div().flex().flex_row().justify_center().child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(RED))
+                            .child("⏹ Stop")
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|_this, _, _, cx| {
+                                    AUDIO_STATE.with(|s| {
+                                        let st = s.borrow();
+                                        if let Some(ref p) = st.player {
+                                            let _ = p.stop();
+                                        }
+                                    });
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
                 ),
         )
         // ── Volume ──────────────────────────────────────
@@ -421,12 +448,7 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(text_color))
-                                .child("Volume"),
-                        )
+                        .child(div().text_sm().text_color(rgb(text_color)).child("Volume"))
                         .child(
                             div()
                                 .text_sm()
@@ -440,19 +462,9 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                         .flex_row()
                         .items_center()
                         .gap_3()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(sub_text))
-                                .child("🔈"),
-                        )
+                        .child(div().text_sm().text_color(rgb(sub_text)).child("🔈"))
                         .child(volume_bar(volume, dark))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(sub_text))
-                                .child("🔊"),
-                        ),
+                        .child(div().text_sm().text_color(rgb(sub_text)).child("🔊")),
                 )
                 .child(
                     div()
@@ -552,16 +564,12 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
         // ── Error display ───────────────────────────────
         .when(error.is_some(), |d| {
             d.child(
-                div()
-                    .p_3()
-                    .rounded_xl()
-                    .bg(rgb(0x3D1111))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(RED))
-                            .child(error.unwrap_or_default()),
-                    ),
+                div().p_3().rounded_xl().bg(rgb(0x3D1111)).child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(RED))
+                        .child(error.unwrap_or_default()),
+                ),
             )
         })
 }
@@ -582,11 +590,7 @@ fn volume_bar(volume: f32, dark: bool) -> impl IntoElement {
         )
 }
 
-fn volume_btn(
-    label: &str,
-    vol: f32,
-    cx: &mut gpui::Context<Router>,
-) -> impl IntoElement {
+fn volume_btn(label: &str, vol: f32, cx: &mut gpui::Context<Router>) -> impl IntoElement {
     div()
         .px_3()
         .py_1()
@@ -613,11 +617,7 @@ fn volume_btn(
         )
 }
 
-fn speed_btn(
-    label: &str,
-    spd: f32,
-    cx: &mut gpui::Context<Router>,
-) -> impl IntoElement {
+fn speed_btn(label: &str, spd: f32, cx: &mut gpui::Context<Router>) -> impl IntoElement {
     div()
         .px_3()
         .py_1()
@@ -766,9 +766,7 @@ fn start_position_polling(cx: &mut gpui::Context<Router>) {
                         }
                     }
                     // Update media session with current position
-                    let _ = media_session::set_playback_state(
-                        playing, st.position_ms, st.speed,
-                    );
+                    let _ = media_session::set_playback_state(playing, st.position_ms, st.speed);
                     idle
                 } else {
                     true

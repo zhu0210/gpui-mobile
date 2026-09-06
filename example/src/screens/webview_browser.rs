@@ -135,17 +135,12 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
             )
             // The rest of the screen is behind the native WebView overlay
             .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x666666))
-                            .child("WebView overlay active"),
-                    ),
+                div().flex_1().flex().items_center().justify_center().child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x666666))
+                        .child("WebView overlay active"),
+                ),
             )
             .into_any_element()
     } else {

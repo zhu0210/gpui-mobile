@@ -4,17 +4,18 @@ use std::cell::RefCell;
 use std::time::Duration;
 
 use gpui::{div, prelude::*, px, rgb};
-use gpui_mobile::packages::video_player::VideoPlayer;
 use gpui_mobile::packages::media_session;
+use gpui_mobile::packages::video_player::VideoPlayer;
 
-use super::{Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_SUBTEXT, LIGHT_TEXT, MAUVE, RED, SURFACE0, SUBTEXT, TEXT, YELLOW};
+use super::{
+    Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_SUBTEXT, LIGHT_TEXT, MAUVE, RED, SUBTEXT, SURFACE0,
+    TEXT, YELLOW,
+};
 
 /// Sample video URLs for demo.
 const VIDEOS: &[(&str, &str)] = &[
-    ("Big Buck Bunny", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"),
-    ("Elephant Dream", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"),
-    ("Sintel Trailer", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4"),
-    ("Tears of Steel", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"),
+    ("Big Buck Bunny", "https://lorem.video/bunny_720p"),
+    ("Cat", "https://lorem.video/hls/bunny/480p/media.m3u8"),
 ];
 
 pub(crate) struct VideoState {
@@ -96,7 +97,11 @@ fn format_time(ms: u64) -> String {
     format!("{}:{:02}", mins, secs)
 }
 
-pub fn render(router: &Router, window: &mut gpui::Window, cx: &mut gpui::Context<Router>) -> impl IntoElement {
+pub fn render(
+    router: &Router,
+    window: &mut gpui::Window,
+    cx: &mut gpui::Context<Router>,
+) -> impl IntoElement {
     let dark = router.dark_mode;
     let text_color = if dark { TEXT } else { LIGHT_TEXT };
     let sub_text = if dark { SUBTEXT } else { LIGHT_SUBTEXT };
@@ -104,28 +109,43 @@ pub fn render(router: &Router, window: &mut gpui::Window, cx: &mut gpui::Context
     let safe_area = router.safe_area;
     let viewport_width = window.viewport_size().width.as_f32();
 
-    let (position_ms, duration_ms, volume, speed, looping, current_video, loading, error, has_player, is_playing, video_width, video_height, surface_visible) =
-        VIDEO_STATE.with(|s| {
-            let st = s.borrow();
-            let playing = st.player.as_ref()
-                .and_then(|p| p.is_playing().ok())
-                .unwrap_or(false);
-            (
-                st.position_ms,
-                st.duration_ms,
-                st.volume,
-                st.speed,
-                st.looping,
-                st.current_video,
-                st.loading,
-                st.error.clone(),
-                st.player.is_some(),
-                playing,
-                st.video_width,
-                st.video_height,
-                st.surface_visible,
-            )
-        });
+    let (
+        position_ms,
+        duration_ms,
+        volume,
+        speed,
+        looping,
+        current_video,
+        loading,
+        error,
+        has_player,
+        is_playing,
+        video_width,
+        video_height,
+        surface_visible,
+    ) = VIDEO_STATE.with(|s| {
+        let st = s.borrow();
+        let playing = st
+            .player
+            .as_ref()
+            .and_then(|p| p.is_playing().ok())
+            .unwrap_or(false);
+        (
+            st.position_ms,
+            st.duration_ms,
+            st.volume,
+            st.speed,
+            st.looping,
+            st.current_video,
+            st.loading,
+            st.error.clone(),
+            st.player.is_some(),
+            playing,
+            st.video_width,
+            st.video_height,
+            st.surface_visible,
+        )
+    });
 
     let progress = if duration_ms > 0 {
         (position_ms as f32 / duration_ms as f32).min(1.0)
@@ -189,7 +209,9 @@ pub fn render(router: &Router, window: &mut gpui::Window, cx: &mut gpui::Context
                     cx.listener(|_this, _, _, cx| {
                         VIDEO_STATE.with(|s| {
                             let mut st = s.borrow_mut();
-                            if st.player.is_none() { return; }
+                            if st.player.is_none() {
+                                return;
+                            }
                             if !st.surface_visible {
                                 st.surface_visible = true;
                             } else {
@@ -218,431 +240,437 @@ pub fn render(router: &Router, window: &mut gpui::Window, cx: &mut gpui::Context
                         .gap_4()
                         .px_4()
                         .py_4()
-        // ── Video list ──────────────────────────────────
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(sub_text))
-                .child("Select a video"),
-        )
-        .child({
-            let mut list = div().flex().flex_col().gap_2();
-            for (i, (name, _url)) in VIDEOS.iter().enumerate() {
-                let is_current = i == current_video;
-                let accent = if is_current { MAUVE } else { card_bg };
-                let idx = i;
-                list = list.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_3()
-                        .p_3()
-                        .rounded_xl()
-                        .bg(rgb(card_bg))
-                        .border_l_4()
-                        .border_color(rgb(accent))
+                        // ── Video list ──────────────────────────────────
                         .child(
                             div()
-                                .text_xl()
-                                .text_color(rgb(if is_current { MAUVE } else { sub_text }))
-                                .child("🎬"),
+                                .text_sm()
+                                .text_color(rgb(sub_text))
+                                .child("Select a video"),
                         )
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_base()
-                                .text_color(rgb(if is_current { MAUVE } else { text_color }))
-                                .child(name.to_string()),
-                        )
-                        .when(is_current, |d| {
-                            d.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MAUVE))
-                                    .child("NOW"),
-                            )
+                        .child({
+                            let mut list = div().flex().flex_col().gap_2();
+                            for (i, (name, _url)) in VIDEOS.iter().enumerate() {
+                                let is_current = i == current_video;
+                                let accent = if is_current { MAUVE } else { card_bg };
+                                let idx = i;
+                                list = list.child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_3()
+                                        .p_3()
+                                        .rounded_xl()
+                                        .bg(rgb(card_bg))
+                                        .border_l_4()
+                                        .border_color(rgb(accent))
+                                        .child(
+                                            div()
+                                                .text_xl()
+                                                .text_color(rgb(if is_current {
+                                                    MAUVE
+                                                } else {
+                                                    sub_text
+                                                }))
+                                                .child("🎬"),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .text_base()
+                                                .text_color(rgb(if is_current {
+                                                    MAUVE
+                                                } else {
+                                                    text_color
+                                                }))
+                                                .child(name.to_string()),
+                                        )
+                                        .when(is_current, |d| {
+                                            d.child(
+                                                div().text_xs().text_color(rgb(MAUVE)).child("NOW"),
+                                            )
+                                        })
+                                        .on_mouse_down(
+                                            gpui::MouseButton::Left,
+                                            cx.listener(move |_this, _, _, cx| {
+                                                load_video(idx, cx);
+                                            }),
+                                        ),
+                                );
+                            }
+                            list
                         })
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(move |_this, _, _, cx| {
-                                load_video(idx, cx);
-                            }),
-                        ),
-                );
-            }
-            list
-        })
-        // ── Now playing card ────────────────────────────
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .p_4()
-                .rounded_xl()
-                .bg(rgb(card_bg))
-                // Video title
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
+                        // ── Now playing card ────────────────────────────
                         .child(
                             div()
-                                .text_lg()
-                                .text_color(rgb(text_color))
-                                .child(VIDEOS[current_video].0.to_string()),
-                        ),
-                )
-                // Video info
-                .when(video_width > 0, |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(sub_text))
-                                    .child(format!("{}x{}", video_width, video_height)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(sub_text))
-                                    .child(format_time(duration_ms)),
-                            ),
-                    )
-                })
-                // Status
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(if loading { YELLOW } else { sub_text }))
-                                .child(if loading {
-                                    "Loading...".to_string()
-                                } else if is_playing {
-                                    "Playing".to_string()
-                                } else if has_player {
-                                    "Paused".to_string()
-                                } else {
-                                    "Select a video".to_string()
-                                }),
-                        ),
-                )
-                // Progress bar
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(4.0))
-                                .rounded_full()
-                                .bg(rgb(if dark { 0x3A3A45 } else { 0xD0D0D8 }))
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .p_4()
+                                .rounded_xl()
+                                .bg(rgb(card_bg))
+                                // Video title
                                 .child(
                                     div()
-                                        .h(px(4.0))
-                                        .rounded_full()
-                                        .bg(rgb(MAUVE))
-                                        .w(px(progress * 300.0)),
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            div()
+                                                .text_lg()
+                                                .text_color(rgb(text_color))
+                                                .child(VIDEOS[current_video].0.to_string()),
+                                        ),
+                                )
+                                // Video info
+                                .when(video_width > 0, |d| {
+                                    d.child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .justify_center()
+                                            .gap_3()
+                                            .child(
+                                                div().text_xs().text_color(rgb(sub_text)).child(
+                                                    format!("{}x{}", video_width, video_height),
+                                                ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(sub_text))
+                                                    .child(format_time(duration_ms)),
+                                            ),
+                                    )
+                                })
+                                // Status
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(if loading {
+                                                    YELLOW
+                                                } else {
+                                                    sub_text
+                                                }))
+                                                .child(if loading {
+                                                    "Loading...".to_string()
+                                                } else if is_playing {
+                                                    "Playing".to_string()
+                                                } else if has_player {
+                                                    "Paused".to_string()
+                                                } else {
+                                                    "Select a video".to_string()
+                                                }),
+                                        ),
+                                )
+                                // Progress bar
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .h(px(4.0))
+                                                .rounded_full()
+                                                .bg(rgb(if dark { 0x3A3A45 } else { 0xD0D0D8 }))
+                                                .child(
+                                                    div()
+                                                        .h(px(4.0))
+                                                        .rounded_full()
+                                                        .bg(rgb(MAUVE))
+                                                        .w(px(progress * 300.0)),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_row()
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(sub_text))
+                                                        .child(format_time(position_ms)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(sub_text))
+                                                        .child(format_time(duration_ms)),
+                                                ),
+                                        ),
+                                )
+                                // Playback controls
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap_6()
+                                        // Previous
+                                        .child(
+                                            div()
+                                                .text_2xl()
+                                                .text_color(rgb(text_color))
+                                                .child("⏮")
+                                                .on_mouse_down(
+                                                    gpui::MouseButton::Left,
+                                                    cx.listener(|_this, _, _, cx| {
+                                                        let prev = VIDEO_STATE.with(|s| {
+                                                            let st = s.borrow();
+                                                            if st.current_video == 0 {
+                                                                VIDEOS.len() - 1
+                                                            } else {
+                                                                st.current_video - 1
+                                                            }
+                                                        });
+                                                        load_video(prev, cx);
+                                                    }),
+                                                ),
+                                        )
+                                        // Rewind 10s
+                                        .child(
+                                            div()
+                                                .text_xl()
+                                                .text_color(rgb(text_color))
+                                                .child("-10s")
+                                                .on_mouse_down(
+                                                    gpui::MouseButton::Left,
+                                                    cx.listener(|_this, _, _, cx| {
+                                                        VIDEO_STATE.with(|s| {
+                                                            let st = s.borrow();
+                                                            if let Some(ref p) = st.player {
+                                                                let pos = st
+                                                                    .position_ms
+                                                                    .saturating_sub(10_000);
+                                                                let _ = p.seek(pos);
+                                                            }
+                                                        });
+                                                        cx.notify();
+                                                    }),
+                                                ),
+                                        )
+                                        // Play/Pause
+                                        .child(
+                                            div()
+                                                .size(px(56.0))
+                                                .rounded_full()
+                                                .bg(rgb(MAUVE))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(
+                                                    div()
+                                                        .text_2xl()
+                                                        .text_color(rgb(0xFFFFFF))
+                                                        .child(if is_playing {
+                                                            "⏸"
+                                                        } else {
+                                                            "▶"
+                                                        }),
+                                                )
+                                                .on_mouse_down(
+                                                    gpui::MouseButton::Left,
+                                                    cx.listener(|_this, _, _, cx| {
+                                                        VIDEO_STATE.with(|s| {
+                                                            let st = s.borrow();
+                                                            if let Some(ref p) = st.player {
+                                                                if p.is_playing().unwrap_or(false) {
+                                                                    let _ = p.pause();
+                                                                } else {
+                                                                    let _ = p.play();
+                                                                }
+                                                            }
+                                                        });
+                                                        cx.notify();
+                                                    }),
+                                                ),
+                                        )
+                                        // Forward 10s
+                                        .child(
+                                            div()
+                                                .text_xl()
+                                                .text_color(rgb(text_color))
+                                                .child("+10s")
+                                                .on_mouse_down(
+                                                    gpui::MouseButton::Left,
+                                                    cx.listener(|_this, _, _, cx| {
+                                                        VIDEO_STATE.with(|s| {
+                                                            let st = s.borrow();
+                                                            if let Some(ref p) = st.player {
+                                                                let pos = (st.position_ms + 10_000)
+                                                                    .min(st.duration_ms);
+                                                                let _ = p.seek(pos);
+                                                            }
+                                                        });
+                                                        cx.notify();
+                                                    }),
+                                                ),
+                                        )
+                                        // Next
+                                        .child(
+                                            div()
+                                                .text_2xl()
+                                                .text_color(rgb(text_color))
+                                                .child("⏭")
+                                                .on_mouse_down(
+                                                    gpui::MouseButton::Left,
+                                                    cx.listener(|_this, _, _, cx| {
+                                                        let next = VIDEO_STATE.with(|s| {
+                                                            let st = s.borrow();
+                                                            (st.current_video + 1) % VIDEOS.len()
+                                                        });
+                                                        load_video(next, cx);
+                                                    }),
+                                                ),
+                                        ),
                                 ),
                         )
+                        // ── Volume ──────────────────────────────────────
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .p_4()
+                                .rounded_xl()
+                                .bg(rgb(card_bg))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(text_color))
+                                                .child("Volume"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(sub_text))
+                                                .child(format!("{}%", (volume * 100.0) as u32)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .justify_center()
+                                        .gap_3()
+                                        .child(vol_btn("25%", 0.25, cx))
+                                        .child(vol_btn("50%", 0.5, cx))
+                                        .child(vol_btn("75%", 0.75, cx))
+                                        .child(vol_btn("100%", 1.0, cx)),
+                                ),
+                        )
+                        // ── Speed ───────────────────────────────────────
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .p_4()
+                                .rounded_xl()
+                                .bg(rgb(card_bg))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(text_color))
+                                                .child("Playback Speed"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(sub_text))
+                                                .child(format!("{:.1}x", speed)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .justify_center()
+                                        .gap_3()
+                                        .child(spd_btn("0.5x", 0.5, cx))
+                                        .child(spd_btn("1.0x", 1.0, cx))
+                                        .child(spd_btn("1.5x", 1.5, cx))
+                                        .child(spd_btn("2.0x", 2.0, cx)),
+                                ),
+                        )
+                        // ── Loop toggle ─────────────────────────────────
                         .child(
                             div()
                                 .flex()
                                 .flex_row()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(sub_text))
-                                        .child(format_time(position_ms)),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(sub_text))
-                                        .child(format_time(duration_ms)),
-                                ),
-                        ),
-                )
-                // Playback controls
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .gap_6()
-                        // Previous
-                        .child(
-                            div()
-                                .text_2xl()
-                                .text_color(rgb(text_color))
-                                .child("⏮")
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(|_this, _, _, cx| {
-                                        let prev = VIDEO_STATE.with(|s| {
-                                            let st = s.borrow();
-                                            if st.current_video == 0 { VIDEOS.len() - 1 } else { st.current_video - 1 }
-                                        });
-                                        load_video(prev, cx);
-                                    }),
-                                ),
-                        )
-                        // Rewind 10s
-                        .child(
-                            div()
-                                .text_xl()
-                                .text_color(rgb(text_color))
-                                .child("-10s")
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(|_this, _, _, cx| {
-                                        VIDEO_STATE.with(|s| {
-                                            let st = s.borrow();
-                                            if let Some(ref p) = st.player {
-                                                let pos = st.position_ms.saturating_sub(10_000);
-                                                let _ = p.seek(pos);
-                                            }
-                                        });
-                                        cx.notify();
-                                    }),
-                                ),
-                        )
-                        // Play/Pause
-                        .child(
-                            div()
-                                .size(px(56.0))
-                                .rounded_full()
-                                .bg(rgb(MAUVE))
-                                .flex()
                                 .items_center()
-                                .justify_center()
+                                .justify_between()
+                                .p_4()
+                                .rounded_xl()
+                                .bg(rgb(card_bg))
+                                .child(div().text_sm().text_color(rgb(text_color)).child("Loop"))
                                 .child(
                                     div()
-                                        .text_2xl()
-                                        .text_color(rgb(0xFFFFFF))
-                                        .child(if is_playing { "⏸" } else { "▶" }),
-                                )
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(|_this, _, _, cx| {
-                                        VIDEO_STATE.with(|s| {
-                                            let st = s.borrow();
-                                            if let Some(ref p) = st.player {
-                                                if p.is_playing().unwrap_or(false) {
-                                                    let _ = p.pause();
-                                                } else {
-                                                    let _ = p.play();
-                                                }
-                                            }
-                                        });
-                                        cx.notify();
-                                    }),
+                                        .px_4()
+                                        .py_1()
+                                        .rounded_lg()
+                                        .bg(rgb(if looping { GREEN } else { 0x3A3A45 }))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(0xFFFFFF))
+                                                .child(if looping { "ON" } else { "OFF" }),
+                                        )
+                                        .on_mouse_down(
+                                            gpui::MouseButton::Left,
+                                            cx.listener(|_this, _, _, cx| {
+                                                VIDEO_STATE.with(|s| {
+                                                    let mut st = s.borrow_mut();
+                                                    st.looping = !st.looping;
+                                                    if let Some(ref p) = st.player {
+                                                        let _ = p.set_looping(st.looping);
+                                                    }
+                                                });
+                                                cx.notify();
+                                            }),
+                                        ),
                                 ),
                         )
-                        // Forward 10s
-                        .child(
-                            div()
-                                .text_xl()
-                                .text_color(rgb(text_color))
-                                .child("+10s")
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(|_this, _, _, cx| {
-                                        VIDEO_STATE.with(|s| {
-                                            let st = s.borrow();
-                                            if let Some(ref p) = st.player {
-                                                let pos = (st.position_ms + 10_000).min(st.duration_ms);
-                                                let _ = p.seek(pos);
-                                            }
-                                        });
-                                        cx.notify();
-                                    }),
+                        // ── Error display ───────────────────────────────
+                        .when(error.is_some(), |d| {
+                            d.child(
+                                div().p_3().rounded_xl().bg(rgb(0x3D1111)).child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(RED))
+                                        .child(error.unwrap_or_default()),
                                 ),
-                        )
-                        // Next
-                        .child(
-                            div()
-                                .text_2xl()
-                                .text_color(rgb(text_color))
-                                .child("⏭")
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(|_this, _, _, cx| {
-                                        let next = VIDEO_STATE.with(|s| {
-                                            let st = s.borrow();
-                                            (st.current_video + 1) % VIDEOS.len()
-                                        });
-                                        load_video(next, cx);
-                                    }),
-                                ),
-                        ),
-                ),
-        )
-        // ── Volume ──────────────────────────────────────
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_4()
-                .rounded_xl()
-                .bg(rgb(card_bg))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(text_color))
-                                .child("Volume"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(sub_text))
-                                .child(format!("{}%", (volume * 100.0) as u32)),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_center()
-                        .gap_3()
-                        .child(vol_btn("25%", 0.25, cx))
-                        .child(vol_btn("50%", 0.5, cx))
-                        .child(vol_btn("75%", 0.75, cx))
-                        .child(vol_btn("100%", 1.0, cx)),
-                ),
-        )
-        // ── Speed ───────────────────────────────────────
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_4()
-                .rounded_xl()
-                .bg(rgb(card_bg))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(text_color))
-                                .child("Playback Speed"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(sub_text))
-                                .child(format!("{:.1}x", speed)),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_center()
-                        .gap_3()
-                        .child(spd_btn("0.5x", 0.5, cx))
-                        .child(spd_btn("1.0x", 1.0, cx))
-                        .child(spd_btn("1.5x", 1.5, cx))
-                        .child(spd_btn("2.0x", 2.0, cx)),
-                ),
-        )
-        // ── Loop toggle ─────────────────────────────────
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .p_4()
-                .rounded_xl()
-                .bg(rgb(card_bg))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(text_color))
-                        .child("Loop"),
-                )
-                .child(
-                    div()
-                        .px_4()
-                        .py_1()
-                        .rounded_lg()
-                        .bg(rgb(if looping { GREEN } else { 0x3A3A45 }))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0xFFFFFF))
-                                .child(if looping { "ON" } else { "OFF" }),
-                        )
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|_this, _, _, cx| {
-                                VIDEO_STATE.with(|s| {
-                                    let mut st = s.borrow_mut();
-                                    st.looping = !st.looping;
-                                    if let Some(ref p) = st.player {
-                                        let _ = p.set_looping(st.looping);
-                                    }
-                                });
-                                cx.notify();
-                            }),
-                        ),
-                ),
-        )
-        // ── Error display ───────────────────────────────
-        .when(error.is_some(), |d| {
-            d.child(
-                div()
-                    .p_3()
-                    .rounded_xl()
-                    .bg(rgb(0x3D1111))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(RED))
-                            .child(error.unwrap_or_default()),
-                    ),
-            )
-        }),
+                            )
+                        }),
                 ), // close .child(inner flex_col div)
         ) // close .child(scroll container)
 }
 
-fn vol_btn(
-    label: &str,
-    vol: f32,
-    cx: &mut gpui::Context<Router>,
-) -> impl IntoElement {
+fn vol_btn(label: &str, vol: f32, cx: &mut gpui::Context<Router>) -> impl IntoElement {
     div()
         .px_3()
         .py_1()
@@ -669,11 +697,7 @@ fn vol_btn(
         )
 }
 
-fn spd_btn(
-    label: &str,
-    spd: f32,
-    cx: &mut gpui::Context<Router>,
-) -> impl IntoElement {
+fn spd_btn(label: &str, spd: f32, cx: &mut gpui::Context<Router>) -> impl IntoElement {
     div()
         .px_3()
         .py_1()
@@ -792,9 +816,7 @@ fn start_position_polling(cx: &mut gpui::Context<Router>) {
                         }
                     }
                     // Update media session with current position
-                    let _ = media_session::set_playback_state(
-                        playing, st.position_ms, st.speed,
-                    );
+                    let _ = media_session::set_playback_state(playing, st.position_ms, st.speed);
                     false
                 } else {
                     true

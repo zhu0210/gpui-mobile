@@ -19,12 +19,12 @@ plugins {
 
 android {
     namespace = "dev.gpui.mobile.example"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "dev.gpui.mobile.example"
         minSdk = 26          // Vulkan 1.0 is mandatory from API 26+
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0.0"
 
@@ -100,6 +100,9 @@ dependencies {
     implementation("androidx.core:core-splashscreen:1.0.1")
     // AndroidX Biometric for BiometricPrompt (used by GpuiAuthActivity)
     implementation("androidx.biometric:biometric:1.1.0")
-    // AndroidX Media for MediaSessionCompat (used by GpuiMediaSession for system controls)
-    implementation("androidx.media:media:1.7.1")
+    // AndroidX Media3 for MediaSession and ExoPlayer (HLS support)
+    val media3Version = "1.11.0"
+    implementation("androidx.media3:media3-exoplayer:$media3Version")
+    implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
+    implementation("androidx.media3:media3-session:$media3Version")
 }

@@ -1,24 +1,35 @@
 package dev.gpui.mobile;
 
 import android.app.Activity;
-import android.media.MediaPlayer;
-import android.media.PlaybackParams;
-import android.os.Build;
+import android.net.Uri;
+import android.util.Log;
 import android.util.SparseArray;
 
-import java.io.IOException;
+import androidx.annotation.OptIn;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.MimeTypes;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.PlaybackParameters;
+import androidx.media3.common.Player;
+import androidx.media3.common.util.UnstableApi;
+import androidx.media3.exoplayer.ExoPlayer;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
- * Audio playback helper for the GPUI audio package.
+ * Audio playback helper for the GPUI audio package using AndroidX Media3 (ExoPlayer).
  *
- * <p>Uses {@link MediaPlayer} for audio playback. All public methods are static
+ * <p>Supports HLS and other streaming formats. All public methods are static
  * and called from Rust via JNI.</p>
  */
+@OptIn(markerClass = UnstableApi.class)
 public final class GpuiAudio {
 
     private static final String TAG = "GpuiAudio";
-    private static final SparseArray<MediaPlayer> sPlayers = new SparseArray<>();
+    private static final SparseArray<ExoPlayer> sPlayers = new SparseArray<>();
     private static int sNextId = 1;
+    private static final Object sLock = new Object();
 
     /**
      * Create a new audio player.
@@ -26,17 +37,29 @@ public final class GpuiAudio {
      * @return Player ID, or -1 on failure.
      */
     public static int create(Activity activity) {
-        try {
-            int id = sNextId++;
-            MediaPlayer mp = new MediaPlayer();
-            synchronized (sPlayers) {
-                sPlayers.put(id, mp);
+        final CountDownLatch latch = new CountDownLatch(1);
+        final int[] result = new int[]{-1};
+
+        activity.runOnUiThread(() -> {
+            try {
+                ExoPlayer player = new ExoPlayer.Builder(activity).build();
+                synchronized (sLock) {
+                    int id = sNextId++;
+                    sPlayers.put(id, player);
+                    result[0] = id;
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "create failed", e);
+            } finally {
+                latch.countDown();
             }
-            return id;
-        } catch (Exception e) {
-            android.util.Log.e(TAG, "create failed", e);
-            return -1;
-        }
+        });
+
+        try {
+            latch.await(2, TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {}
+
+        return result[0];
     }
 
     /**
@@ -45,22 +68,51 @@ public final class GpuiAudio {
      * @return Duration in milliseconds, or -1 if unknown/error.
      */
     public static long setUrl(Activity activity, int id, String url) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
         }
-        if (mp == null) return -1;
+        if (player == null) return -1;
+
+        final ExoPlayer fPlayer = player;
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        activity.runOnUiThread(() -> {
+            try {
+                Uri uri = Uri.parse(url);
+                MediaItem.Builder mediaItemBuilder = new MediaItem.Builder().setUri(uri);
+                if (url.toLowerCase().contains(".m3u8")) {
+                    mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8);
+                }
+
+                fPlayer.addListener(new Player.Listener() {
+                    @Override
+                    public void onPlaybackStateChanged(int state) {
+                        if (state == Player.STATE_READY) {
+                            latch.countDown();
+                        }
+                    }
+
+                    @Override
+                    public void onPlayerError(PlaybackException error) {
+                        Log.e(TAG, "playback error for url: " + url, error);
+                        latch.countDown();
+                    }
+                });
+
+                fPlayer.setMediaItem(mediaItemBuilder.build());
+                fPlayer.prepare();
+            } catch (Exception e) {
+                Log.e(TAG, "setUrl failed: " + url, e);
+                latch.countDown();
+            }
+        });
 
         try {
-            mp.reset();
-            mp.setDataSource(url);
-            mp.prepare();
-            return mp.getDuration();
-        } catch (IOException e) {
-            android.util.Log.e(TAG, "setUrl failed: " + url, e);
-            return -1;
-        } catch (Exception e) {
-            android.util.Log.e(TAG, "setUrl failed: " + url, e);
+            latch.await(5, TimeUnit.SECONDS);
+            long duration = fPlayer.getDuration();
+            return duration > 0 ? duration : 0;
+        } catch (InterruptedException e) {
             return -1;
         }
     }
@@ -69,16 +121,12 @@ public final class GpuiAudio {
      * Start or resume playback.
      */
     public static void play(int id) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
         }
-        if (mp == null) return;
-
-        try {
-            mp.start();
-        } catch (IllegalStateException e) {
-            android.util.Log.e(TAG, "play failed", e);
+        if (player != null) {
+            player.getClock().createHandler(player.getApplicationLooper(), null).post(player::play);
         }
     }
 
@@ -86,18 +134,12 @@ public final class GpuiAudio {
      * Pause playback.
      */
     public static void pause(int id) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
         }
-        if (mp == null) return;
-
-        try {
-            if (mp.isPlaying()) {
-                mp.pause();
-            }
-        } catch (IllegalStateException e) {
-            android.util.Log.e(TAG, "pause failed", e);
+        if (player != null) {
+            player.getClock().createHandler(player.getApplicationLooper(), null).post(player::pause);
         }
     }
 
@@ -105,18 +147,15 @@ public final class GpuiAudio {
      * Stop playback and reset to the beginning.
      */
     public static void stop(int id) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
         }
-        if (mp == null) return;
-
-        try {
-            mp.stop();
-            mp.prepare();
-            mp.seekTo(0);
-        } catch (Exception e) {
-            android.util.Log.e(TAG, "stop failed", e);
+        if (player != null) {
+            player.getClock().createHandler(player.getApplicationLooper(), null).post(() -> {
+                player.stop();
+                player.seekTo(0);
+            });
         }
     }
 
@@ -124,16 +163,12 @@ public final class GpuiAudio {
      * Seek to position in milliseconds.
      */
     public static void seek(int id, long positionMs) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
         }
-        if (mp == null) return;
-
-        try {
-            mp.seekTo((int) positionMs);
-        } catch (IllegalStateException e) {
-            android.util.Log.e(TAG, "seek failed", e);
+        if (player != null) {
+            player.getClock().createHandler(player.getApplicationLooper(), null).post(() -> player.seekTo(positionMs));
         }
     }
 
@@ -141,40 +176,29 @@ public final class GpuiAudio {
      * Set volume (0.0 to 1.0).
      */
     public static void setVolume(int id, float volume) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
         }
-        if (mp == null) return;
-
-        try {
+        if (player != null) {
             float v = Math.max(0.0f, Math.min(1.0f, volume));
-            mp.setVolume(v, v);
-        } catch (IllegalStateException e) {
-            android.util.Log.e(TAG, "setVolume failed", e);
+            player.getClock().createHandler(player.getApplicationLooper(), null).post(() -> player.setVolume(v));
         }
     }
 
     /**
-     * Set playback speed (requires API 23+).
+     * Set playback speed.
      */
     public static void setSpeed(int id, float speed) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
         }
-        if (mp == null) return;
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            try {
-                PlaybackParams params = mp.getPlaybackParams();
-                params.setSpeed(speed);
-                mp.setPlaybackParams(params);
-            } catch (Exception e) {
-                android.util.Log.e(TAG, "setSpeed failed", e);
-            }
-        } else {
-            android.util.Log.w(TAG, "setSpeed requires API 23+, current: " + Build.VERSION.SDK_INT);
+        if (player != null) {
+            player.getClock().createHandler(player.getApplicationLooper(), null).post(() -> {
+                PlaybackParameters params = new PlaybackParameters(speed);
+                player.setPlaybackParameters(params);
+            });
         }
     }
 
@@ -182,16 +206,14 @@ public final class GpuiAudio {
      * Set looping mode.
      */
     public static void setLooping(int id, boolean looping) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
         }
-        if (mp == null) return;
-
-        try {
-            mp.setLooping(looping);
-        } catch (IllegalStateException e) {
-            android.util.Log.e(TAG, "setLooping failed", e);
+        if (player != null) {
+            player.getClock().createHandler(player.getApplicationLooper(), null).post(() -> {
+                player.setRepeatMode(looping ? Player.REPEAT_MODE_ALL : Player.REPEAT_MODE_OFF);
+            });
         }
     }
 
@@ -199,68 +221,56 @@ public final class GpuiAudio {
      * Get current playback position in milliseconds.
      */
     public static long getPosition(int id) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
         }
-        if (mp == null) return -1;
-
-        try {
-            return mp.getCurrentPosition();
-        } catch (IllegalStateException e) {
-            return -1;
+        if (player != null) {
+            return player.getCurrentPosition();
         }
+        return -1;
     }
 
     /**
      * Get total duration in milliseconds.
      */
     public static long getDuration(int id) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
         }
-        if (mp == null) return -1;
-
-        try {
-            return mp.getDuration();
-        } catch (IllegalStateException e) {
-            return -1;
+        if (player != null) {
+            long dur = player.getDuration();
+            return dur > 0 ? dur : 0;
         }
+        return -1;
     }
 
     /**
      * Check if currently playing.
      */
     public static boolean isPlaying(int id) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
         }
-        if (mp == null) return false;
-
-        try {
-            return mp.isPlaying();
-        } catch (IllegalStateException e) {
-            return false;
+        if (player != null) {
+            return player.isPlaying();
         }
+        return false;
     }
 
     /**
      * Release the player and free resources.
      */
     public static void dispose(int id) {
-        MediaPlayer mp;
-        synchronized (sPlayers) {
-            mp = sPlayers.get(id);
+        ExoPlayer player;
+        synchronized (sLock) {
+            player = sPlayers.get(id);
             sPlayers.remove(id);
         }
-        if (mp == null) return;
-
-        try {
-            mp.release();
-        } catch (Exception e) {
-            android.util.Log.e(TAG, "dispose failed", e);
+        if (player != null) {
+            player.getClock().createHandler(player.getApplicationLooper(), null).post(player::release);
         }
     }
 

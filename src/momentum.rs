@@ -140,7 +140,7 @@ impl VelocityTracker {
         }
 
         // Sort by time ascending.
-        recent.sort_by(|a, b| a.time.cmp(&b.time));
+        recent.sort_by_key(|sample| sample.time);
 
         // Use weighted regression for 3+ samples, simple difference for 2.
         if recent.len() >= 3 {

@@ -27,11 +27,11 @@ const MIC_RECORDING_COLOR: u32 = 0xFF3B30;
 
 const REACTION_EMOJIS: &[&str] = &[
     "\u{2764}\u{fe0f}", // ❤️
-    "\u{1f44d}",         // 👍
-    "\u{1f44e}",         // 👎
-    "\u{1f602}",         // 😂
-    "\u{2755}",          // ❕
-    "\u{2754}",          // ❔
+    "\u{1f44d}",        // 👍
+    "\u{1f44e}",        // 👎
+    "\u{1f602}",        // 😂
+    "\u{2755}",         // ❕
+    "\u{2754}",         // ❔
 ];
 
 // ── Sample data ─────────────────────────────────────────────────────────────
@@ -274,28 +274,41 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
 
     let dark = router.dark_mode;
 
-    let (sent_messages, compose_text, focused, reaction_picker_msg, user_reactions, recording, swipe_msg, swipe_offset, show_plus_menu) =
-        CHAT_STATE.with(|s| {
-            let st = s.borrow();
-            (
-                st.sent_messages.clone(),
-                st.compose_text.clone(),
-                st.focused,
-                st.reaction_picker,
-                st.user_reactions.clone(),
-                st.mic_recording,
-                st.swipe_msg,
-                st.swipe_offset,
-                st.show_plus_menu,
-            )
-        });
+    let (
+        sent_messages,
+        compose_text,
+        focused,
+        reaction_picker_msg,
+        user_reactions,
+        recording,
+        swipe_msg,
+        swipe_offset,
+        show_plus_menu,
+    ) = CHAT_STATE.with(|s| {
+        let st = s.borrow();
+        (
+            st.sent_messages.clone(),
+            st.compose_text.clone(),
+            st.focused,
+            st.reaction_picker,
+            st.user_reactions.clone(),
+            st.mic_recording,
+            st.swipe_msg,
+            st.swipe_offset,
+            st.show_plus_menu,
+        )
+    });
 
     let kb_height = gpui_mobile::keyboard_height();
     // Don't subtract safe_bottom — the chat screen has no bottom safe-area
     // spacer (it's not a tab-root), and the iOS keyboard height already
     // includes the safe area. Add a small margin so the composer doesn't
     // sit flush against the keyboard.
-    let kb_padding = if kb_height > 0.0 { kb_height + 4.0 } else { 0.0 };
+    let kb_padding = if kb_height > 0.0 {
+        kb_height + 4.0
+    } else {
+        0.0
+    };
 
     div()
         .flex()
@@ -337,9 +350,7 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
         )
         // ── Composer bar ─────────────────────────────────────────────────
         // ── Plus menu (above composer) ────────────────────────────────
-        .when(show_plus_menu, |d| {
-            d.child(render_plus_menu(dark, cx))
-        })
+        .when(show_plus_menu, |d| d.child(render_plus_menu(dark, cx)))
         // ── Composer bar ─────────────────────────────────────────────────
         .child(render_composer(dark, &compose_text, focused, recording, cx))
         // ── Keyboard spacer ──────────────────────────────────────────────
@@ -389,7 +400,11 @@ fn render_messages(
                 .unwrap_or("9:41 AM")
         };
 
-        let msg_swipe = if swipe_msg == Some(i) { swipe_offset } else { 0.0 };
+        let msg_swipe = if swipe_msg == Some(i) {
+            swipe_offset
+        } else {
+            0.0
+        };
         container = container.child(render_bubble_interactive(
             msg,
             i,
@@ -411,7 +426,11 @@ fn render_messages(
             &[] as &[String]
         };
         container = container.child(div().h(px(2.0)));
-        let msg_swipe = if swipe_msg == Some(sent_idx) { swipe_offset } else { 0.0 };
+        let msg_swipe = if swipe_msg == Some(sent_idx) {
+            swipe_offset
+        } else {
+            0.0
+        };
         container = container.child(render_sent_bubble_interactive(
             text,
             sent_idx,
@@ -428,16 +447,12 @@ fn render_messages(
 }
 
 fn timestamp_label(time: &str) -> impl IntoElement {
-    div()
-        .flex()
-        .justify_center()
-        .py_2()
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(TIMESTAMP_COLOR))
-                .child(time.to_string()),
-        )
+    div().flex().justify_center().py_2().child(
+        div()
+            .text_xs()
+            .text_color(rgb(TIMESTAMP_COLOR))
+            .child(time.to_string()),
+    )
 }
 
 // ── Interactive bubble (static messages) ────────────────────────────────────
@@ -460,7 +475,11 @@ fn render_bubble_interactive(
         BUBBLE_RECEIVED_LIGHT
     };
 
-    let text_color = if msg.is_me || dark { 0xFFFFFF } else { 0x000000 };
+    let text_color = if msg.is_me || dark {
+        0xFFFFFF
+    } else {
+        0x000000
+    };
     let max_width = 280.0;
 
     let mut bubble = div()
@@ -481,30 +500,23 @@ fn render_bubble_interactive(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    div()
-                        .text_3xl()
-                        .text_color(rgb(0xFFFFFF))
-                        .child(if msg.image_color == 0x1565C0 {
-                            "\u{1f3d4}\u{fe0f}"
-                        } else {
-                            "\u{1f5fa}\u{fe0f}"
-                        }),
-                ),
+                .child(div().text_3xl().text_color(rgb(0xFFFFFF)).child(
+                    if msg.image_color == 0x1565C0 {
+                        "\u{1f3d4}\u{fe0f}"
+                    } else {
+                        "\u{1f5fa}\u{fe0f}"
+                    },
+                )),
         );
     }
 
     if !msg.text.is_empty() {
-        bubble = bubble
-            .bg(rgb(bubble_color))
-            .px(px(14.0))
-            .py(px(8.0))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(text_color))
-                    .child(msg.text.to_string()),
-            );
+        bubble = bubble.bg(rgb(bubble_color)).px(px(14.0)).py(px(8.0)).child(
+            div()
+                .text_sm()
+                .text_color(rgb(text_color))
+                .child(msg.text.to_string()),
+        );
     } else if msg.has_image {
         bubble = bubble.bg(rgb(bubble_color));
     }
@@ -606,43 +618,40 @@ fn render_bubble_interactive(
 
         if msg.is_me {
             // Sent: bubble slides left, timestamp peeks in from the right
-            swipe_row = swipe_row
-                .justify_end()
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .mr(px(slide)) // negative → moves row left
-                        .child(bubble)
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(TIMESTAMP_COLOR))
-                                .opacity(ts_opacity)
-                                .child(timestamp.to_string()),
-                        ),
-                );
+            swipe_row = swipe_row.justify_end().child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .mr(px(slide)) // negative → moves row left
+                    .child(bubble)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TIMESTAMP_COLOR))
+                            .opacity(ts_opacity)
+                            .child(timestamp.to_string()),
+                    ),
+            );
         } else {
             // Received: bubble slides right, timestamp peeks in from the left
-            swipe_row = swipe_row
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .ml(px(slide)) // positive → moves row right
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(TIMESTAMP_COLOR))
-                                .opacity(ts_opacity)
-                                .child(timestamp.to_string()),
-                        )
-                        .child(bubble),
-                );
+            swipe_row = swipe_row.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .ml(px(slide)) // positive → moves row right
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TIMESTAMP_COLOR))
+                            .opacity(ts_opacity)
+                            .child(timestamp.to_string()),
+                    )
+                    .child(bubble),
+            );
         }
         outer = outer.child(swipe_row);
     } else {
@@ -665,17 +674,13 @@ fn render_bubble_interactive(
             MessageStatus::None => "",
         };
         outer = outer.child(
-            div()
-                .flex()
-                .w_full()
-                .justify_end()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(TIMESTAMP_COLOR))
-                        .pr(px(4.0))
-                        .child(status_text.to_string()),
-                ),
+            div().flex().w_full().justify_end().child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(TIMESTAMP_COLOR))
+                    .pr(px(4.0))
+                    .child(status_text.to_string()),
+            ),
         );
     }
 
@@ -796,17 +801,13 @@ fn render_sent_bubble_interactive(
     outer = outer.child(render_reactions_row(&[], extra_reactions, true, dark));
 
     outer = outer.child(
-        div()
-            .flex()
-            .w_full()
-            .justify_end()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(TIMESTAMP_COLOR))
-                    .pr(px(4.0))
-                    .child("Delivered"),
-            ),
+        div().flex().w_full().justify_end().child(
+            div()
+                .text_xs()
+                .text_color(rgb(TIMESTAMP_COLOR))
+                .pr(px(4.0))
+                .child("Delivered"),
+        ),
     );
 
     outer
@@ -850,16 +851,14 @@ fn render_reaction_picker(
                         CHAT_STATE.with(|s| {
                             let mut st = s.borrow_mut();
                             // Ensure the reactions vec is big enough
-                            let total_msgs =
-                                MESSAGES.len() + st.sent_messages.len();
+                            let total_msgs = MESSAGES.len() + st.sent_messages.len();
                             if st.user_reactions.len() < total_msgs {
                                 st.user_reactions.resize(total_msgs, Vec::new());
                             }
                             if msg_idx < st.user_reactions.len() {
                                 let reactions = &mut st.user_reactions[msg_idx];
                                 // Toggle: remove if already reacted with this emoji
-                                if let Some(pos) =
-                                    reactions.iter().position(|r| r == &emoji_owned)
+                                if let Some(pos) = reactions.iter().position(|r| r == &emoji_owned)
                                 {
                                     reactions.remove(pos);
                                 } else {
@@ -891,18 +890,18 @@ fn render_reactions_row(
     is_me: bool,
     dark: bool,
 ) -> impl IntoElement {
-    let reaction_bg = if dark { REACTION_BG_DARK } else { REACTION_BG_LIGHT };
+    let reaction_bg = if dark {
+        REACTION_BG_DARK
+    } else {
+        REACTION_BG_LIGHT
+    };
 
     let has_any = !static_reactions.is_empty() || !extra_reactions.is_empty();
     if !has_any {
         return div();
     }
 
-    let mut reaction_row = div()
-        .flex()
-        .flex_row()
-        .gap(px(4.0))
-        .mt(px(-4.0));
+    let mut reaction_row = div().flex().flex_row().gap(px(4.0)).mt(px(-4.0));
 
     if is_me {
         reaction_row = reaction_row.mr(px(8.0));
@@ -952,20 +951,21 @@ fn reaction_pill(emoji: &str, count: u8, bg: u32) -> impl IntoElement {
 
 // ── Plus action menu ─────────────────────────────────────────────────────
 
-fn render_plus_menu(
-    dark: bool,
-    cx: &mut gpui::Context<Router>,
-) -> impl IntoElement {
-    let menu_bg = if dark { COMPOSER_BG_DARK } else { COMPOSER_BG_LIGHT };
+fn render_plus_menu(dark: bool, cx: &mut gpui::Context<Router>) -> impl IntoElement {
+    let menu_bg = if dark {
+        COMPOSER_BG_DARK
+    } else {
+        COMPOSER_BG_LIGHT
+    };
     let text_color = if dark { 0xFFFFFF } else { 0x000000 };
 
     let actions: &[(&str, &str)] = &[
-        ("\u{1f4f7}", "Camera"),     // 📷
-        ("\u{1f5bc}\u{fe0f}", "Photos"),     // 🖼️
-        ("\u{1f4cd}", "Location"),   // 📍
-        ("\u{1f4ce}", "File"),       // 📎
-        ("\u{1f3a4}", "Audio"),      // 🎤
-        ("\u{1f464}", "Contact"),    // 👤
+        ("\u{1f4f7}", "Camera"),         // 📷
+        ("\u{1f5bc}\u{fe0f}", "Photos"), // 🖼️
+        ("\u{1f4cd}", "Location"),       // 📍
+        ("\u{1f4ce}", "File"),           // 📎
+        ("\u{1f3a4}", "Audio"),          // 🎤
+        ("\u{1f464}", "Contact"),        // 👤
     ];
 
     div()
@@ -1024,8 +1024,16 @@ fn render_composer(
     recording: bool,
     cx: &mut gpui::Context<Router>,
 ) -> impl IntoElement {
-    let composer_bg = if dark { COMPOSER_BG_DARK } else { COMPOSER_BG_LIGHT };
-    let field_bg = if dark { COMPOSER_FIELD_DARK } else { COMPOSER_FIELD_LIGHT };
+    let composer_bg = if dark {
+        COMPOSER_BG_DARK
+    } else {
+        COMPOSER_BG_LIGHT
+    };
+    let field_bg = if dark {
+        COMPOSER_FIELD_DARK
+    } else {
+        COMPOSER_FIELD_LIGHT
+    };
     let text_color = if dark { 0xFFFFFF } else { 0x000000 };
     let placeholder_color = TIMESTAMP_COLOR;
     let has_text = !compose_text.is_empty();
@@ -1058,12 +1066,7 @@ fn render_composer(
                 .h(px(36.0))
                 .rounded_full()
                 .bg(rgb(IMESSAGE_BLUE))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(0xFFFFFF))
-                        .child("+"),
-                )
+                .child(div().text_sm().text_color(rgb(0xFFFFFF)).child("+"))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
@@ -1090,8 +1093,7 @@ fn render_composer(
                 .bg(rgb(field_bg))
                 .px_3()
                 .child({
-                    let mut row =
-                        div().flex_1().flex().flex_row().items_center().text_sm();
+                    let mut row = div().flex_1().flex().flex_row().items_center().text_sm();
 
                     if has_text {
                         row = row
@@ -1104,12 +1106,7 @@ fn render_composer(
                     }
 
                     if focused {
-                        row = row.child(
-                            div()
-                                .w(px(2.0))
-                                .h(px(16.0))
-                                .bg(rgb(IMESSAGE_BLUE)),
-                        );
+                        row = row.child(div().w(px(2.0)).h(px(16.0)).bg(rgb(IMESSAGE_BLUE)));
                     }
 
                     row
@@ -1136,10 +1133,7 @@ fn render_composer(
                 .rounded_full()
                 .bg(rgb(IMESSAGE_BLUE))
                 .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(0xFFFFFF))
-                        .child("\u{2191}"), // ↑ arrow
+                    div().text_sm().text_color(rgb(0xFFFFFF)).child("\u{2191}"), // ↑ arrow
                 )
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1164,11 +1158,7 @@ fn render_composer(
             } else {
                 COMPOSER_FIELD_LIGHT
             };
-            let mic_fg = if recording {
-                0xFFFFFF
-            } else {
-                IMESSAGE_BLUE
-            };
+            let mic_fg = if recording { 0xFFFFFF } else { IMESSAGE_BLUE };
             div()
                 .id("chat-mic-btn")
                 .flex()
@@ -1179,7 +1169,8 @@ fn render_composer(
                 .rounded_full()
                 .bg(rgb(mic_bg))
                 .when(!recording, |d| {
-                    d.border_1().border_color(rgb(if dark { 0x3A3A3C } else { 0xC7C7CC }))
+                    d.border_1()
+                        .border_color(rgb(if dark { 0x3A3A3C } else { 0xC7C7CC }))
                 })
                 .child(
                     div()
@@ -1193,15 +1184,12 @@ fn render_composer(
                         CHAT_STATE.with(|s| {
                             let mut st = s.borrow_mut();
                             if st.mic_recording {
-                                let _ =
-                                    gpui_mobile::packages::microphone::stop_recording();
+                                let _ = gpui_mobile::packages::microphone::stop_recording();
                                 st.mic_recording = false;
                             } else {
                                 let config =
                                     gpui_mobile::packages::microphone::RecordingConfig::default();
-                                match gpui_mobile::packages::microphone::start_recording(
-                                    &config,
-                                ) {
+                                match gpui_mobile::packages::microphone::start_recording(&config) {
                                     Ok(_) => {
                                         st.mic_recording = true;
                                     }

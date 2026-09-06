@@ -2,7 +2,10 @@
 
 use gpui::{div, prelude::*, px, rgb};
 
-use super::{Router, Screen, BLUE, GREEN, LAVENDER, LIGHT_CARD_BG, LIGHT_SUBTEXT, LIGHT_TEXT, MAUVE, PEACH, RED, SKY, SURFACE0, TEAL, TEXT, YELLOW};
+use super::{
+    Router, Screen, BLUE, GREEN, LAVENDER, LIGHT_CARD_BG, LIGHT_SUBTEXT, LIGHT_TEXT, MAUVE, PEACH,
+    RED, SKY, SURFACE0, TEAL, TEXT, YELLOW,
+};
 
 /// Render the Home screen content area.
 ///
@@ -12,7 +15,11 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
     let user_name = router.user_name.clone();
     let tap_count = router.tap_count;
     let text_color = if router.dark_mode { TEXT } else { LIGHT_TEXT };
-    let card_bg = if router.dark_mode { SURFACE0 } else { LIGHT_CARD_BG };
+    let card_bg = if router.dark_mode {
+        SURFACE0
+    } else {
+        LIGHT_CARD_BG
+    };
     let sub_text = if router.dark_mode {
         super::SUBTEXT
     } else {

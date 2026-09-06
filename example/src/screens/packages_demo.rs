@@ -4,7 +4,10 @@ use std::cell::RefCell;
 
 use gpui::{div, prelude::*, px, rgb};
 
-use super::{Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_DIVIDER, LIGHT_SUBTEXT, LIGHT_TEXT, MAUVE, PEACH, SURFACE0, SURFACE1, TEAL, TEXT, YELLOW};
+use super::{
+    Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_DIVIDER, LIGHT_SUBTEXT, LIGHT_TEXT, MAUVE, PEACH,
+    SURFACE0, SURFACE1, TEAL, TEXT, YELLOW,
+};
 
 // ── Thread-local packages-demo state ────────────────────────────────────────
 
@@ -34,38 +37,58 @@ thread_local! {
 pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoElement {
     let dark_mode = router.dark_mode;
     let text_color = if dark_mode { TEXT } else { LIGHT_TEXT };
-    let sub_text: u32 = if dark_mode { super::SUBTEXT } else { LIGHT_SUBTEXT };
+    let sub_text: u32 = if dark_mode {
+        super::SUBTEXT
+    } else {
+        LIGHT_SUBTEXT
+    };
     let card_bg = if dark_mode { SURFACE0 } else { LIGHT_CARD_BG };
     let divider_color = if dark_mode { SURFACE1 } else { LIGHT_DIVIDER };
 
     let mut root = div().flex().flex_col().flex_1().gap_4().px_4().py_6();
 
     // ── Device Info (native API, no JNI) ────────────────────────────────────
-    root = root
-        .child(section_header("Device Info", sub_text))
-        .child({
-            let info = gpui_mobile::packages::device_info::get_device_info();
-            match info {
-                Ok(di) => info_card(card_bg)
-                    .child(kv_row("Model", &di.model, GREEN, text_color, sub_text))
-                    .child(divider_line(divider_color))
-                    .child(kv_row("Manufacturer", &di.manufacturer, GREEN, text_color, sub_text))
-                    .child(divider_line(divider_color))
-                    .child(kv_row("OS Version", &di.os_version, GREEN, text_color, sub_text))
-                    .child(divider_line(divider_color))
-                    .child(kv_row("Device Name", &di.device_name, GREEN, text_color, sub_text))
-                    .child(divider_line(divider_color))
-                    .child(kv_row(
-                        "Physical Device",
-                        if di.is_physical_device { "Yes" } else { "No" },
-                        GREEN,
-                        text_color,
-                        sub_text,
-                    ))
-                    .into_any_element(),
-                Err(e) => error_card(&e, card_bg, text_color).into_any_element(),
-            }
-        });
+    root = root.child(section_header("Device Info", sub_text)).child({
+        let info = gpui_mobile::packages::device_info::get_device_info();
+        match info {
+            Ok(di) => info_card(card_bg)
+                .child(kv_row("Model", &di.model, GREEN, text_color, sub_text))
+                .child(divider_line(divider_color))
+                .child(kv_row(
+                    "Manufacturer",
+                    &di.manufacturer,
+                    GREEN,
+                    text_color,
+                    sub_text,
+                ))
+                .child(divider_line(divider_color))
+                .child(kv_row(
+                    "OS Version",
+                    &di.os_version,
+                    GREEN,
+                    text_color,
+                    sub_text,
+                ))
+                .child(divider_line(divider_color))
+                .child(kv_row(
+                    "Device Name",
+                    &di.device_name,
+                    GREEN,
+                    text_color,
+                    sub_text,
+                ))
+                .child(divider_line(divider_color))
+                .child(kv_row(
+                    "Physical Device",
+                    if di.is_physical_device { "Yes" } else { "No" },
+                    GREEN,
+                    text_color,
+                    sub_text,
+                ))
+                .into_any_element(),
+            Err(e) => error_card(&e, card_bg, text_color).into_any_element(),
+        }
+    });
 
     // ── Path Provider (native API, no JNI) ──────────────────────────────────
     root = root
@@ -77,77 +100,107 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
             let support = gpui_mobile::packages::path_provider::support_directory();
 
             info_card(card_bg)
-                .child(kv_row("Temp", &path_or_err(&tmp), MAUVE, text_color, sub_text))
+                .child(kv_row(
+                    "Temp",
+                    &path_or_err(&tmp),
+                    MAUVE,
+                    text_color,
+                    sub_text,
+                ))
                 .child(divider_line(divider_color))
-                .child(kv_row("Documents", &path_or_err(&docs), MAUVE, text_color, sub_text))
+                .child(kv_row(
+                    "Documents",
+                    &path_or_err(&docs),
+                    MAUVE,
+                    text_color,
+                    sub_text,
+                ))
                 .child(divider_line(divider_color))
-                .child(kv_row("Cache", &path_or_err(&cache), MAUVE, text_color, sub_text))
+                .child(kv_row(
+                    "Cache",
+                    &path_or_err(&cache),
+                    MAUVE,
+                    text_color,
+                    sub_text,
+                ))
                 .child(divider_line(divider_color))
-                .child(kv_row("Support", &path_or_err(&support), MAUVE, text_color, sub_text))
+                .child(kv_row(
+                    "Support",
+                    &path_or_err(&support),
+                    MAUVE,
+                    text_color,
+                    sub_text,
+                ))
         });
 
     // ── Package Info (JNI) ──────────────────────────────────────────────────
-    root = root
-        .child(section_header("Package Info", sub_text))
-        .child({
-            let info = gpui_mobile::packages::package_info::get_package_info();
-            match info {
-                Ok(pi) => info_card(card_bg)
-                    .child(kv_row("App Name", &pi.app_name, BLUE, text_color, sub_text))
-                    .child(divider_line(divider_color))
-                    .child(kv_row("Package", &pi.package_name, BLUE, text_color, sub_text))
-                    .child(divider_line(divider_color))
-                    .child(kv_row("Version", &pi.version, BLUE, text_color, sub_text))
-                    .child(divider_line(divider_color))
-                    .child(kv_row("Build", &pi.build_number, BLUE, text_color, sub_text))
-                    .into_any_element(),
-                Err(e) => error_card(&e, card_bg, text_color).into_any_element(),
-            }
-        });
+    root = root.child(section_header("Package Info", sub_text)).child({
+        let info = gpui_mobile::packages::package_info::get_package_info();
+        match info {
+            Ok(pi) => info_card(card_bg)
+                .child(kv_row("App Name", &pi.app_name, BLUE, text_color, sub_text))
+                .child(divider_line(divider_color))
+                .child(kv_row(
+                    "Package",
+                    &pi.package_name,
+                    BLUE,
+                    text_color,
+                    sub_text,
+                ))
+                .child(divider_line(divider_color))
+                .child(kv_row("Version", &pi.version, BLUE, text_color, sub_text))
+                .child(divider_line(divider_color))
+                .child(kv_row(
+                    "Build",
+                    &pi.build_number,
+                    BLUE,
+                    text_color,
+                    sub_text,
+                ))
+                .into_any_element(),
+            Err(e) => error_card(&e, card_bg, text_color).into_any_element(),
+        }
+    });
 
     // ── Connectivity (JNI) ──────────────────────────────────────────────────
-    root = root
-        .child(section_header("Connectivity", sub_text))
-        .child({
-            let status = gpui_mobile::packages::connectivity::check_connectivity();
-            let label = format!("{:?}", status);
-            info_card(card_bg).child(kv_row("Status", &label, TEAL, text_color, sub_text))
-        });
+    root = root.child(section_header("Connectivity", sub_text)).child({
+        let status = gpui_mobile::packages::connectivity::check_connectivity();
+        let label = format!("{:?}", status);
+        info_card(card_bg).child(kv_row("Status", &label, TEAL, text_color, sub_text))
+    });
 
     // ── Network Info (JNI) ──────────────────────────────────────────────────
-    root = root
-        .child(section_header("Network Info", sub_text))
-        .child({
-            let info = gpui_mobile::packages::network_info::get_network_info();
-            match info {
-                Ok(ni) => info_card(card_bg)
-                    .child(kv_row(
-                        "WiFi Name",
-                        ni.wifi_name.as_deref().unwrap_or("N/A"),
-                        YELLOW,
-                        text_color,
-                        sub_text,
-                    ))
-                    .child(divider_line(divider_color))
-                    .child(kv_row(
-                        "WiFi BSSID",
-                        ni.wifi_bssid.as_deref().unwrap_or("N/A"),
-                        YELLOW,
-                        text_color,
-                        sub_text,
-                    ))
-                    .child(divider_line(divider_color))
-                    .child(kv_row(
-                        "WiFi IP",
-                        ni.wifi_ip.as_deref().unwrap_or("N/A"),
-                        YELLOW,
-                        text_color,
-                        sub_text,
-                    ))
-                    .into_any_element(),
-                Err(e) => error_card(&e, card_bg, text_color).into_any_element(),
-            }
-        });
+    root = root.child(section_header("Network Info", sub_text)).child({
+        let info = gpui_mobile::packages::network_info::get_network_info();
+        match info {
+            Ok(ni) => info_card(card_bg)
+                .child(kv_row(
+                    "WiFi Name",
+                    ni.wifi_name.as_deref().unwrap_or("N/A"),
+                    YELLOW,
+                    text_color,
+                    sub_text,
+                ))
+                .child(divider_line(divider_color))
+                .child(kv_row(
+                    "WiFi BSSID",
+                    ni.wifi_bssid.as_deref().unwrap_or("N/A"),
+                    YELLOW,
+                    text_color,
+                    sub_text,
+                ))
+                .child(divider_line(divider_color))
+                .child(kv_row(
+                    "WiFi IP",
+                    ni.wifi_ip.as_deref().unwrap_or("N/A"),
+                    YELLOW,
+                    text_color,
+                    sub_text,
+                ))
+                .into_any_element(),
+            Err(e) => error_card(&e, card_bg, text_color).into_any_element(),
+        }
+    });
 
     // ── Shared Preferences (JNI) ────────────────────────────────────────────
     root = root
@@ -170,240 +223,255 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
         });
 
     // ── Vibration (JNI) ─────────────────────────────────────────────────────
-    root = root
-        .child(section_header("Vibration", sub_text))
-        .child({
-            let can = gpui_mobile::packages::vibration::can_vibrate();
-            let mut card = info_card(card_bg).child(kv_row(
-                "Can Vibrate",
-                if can { "Yes" } else { "No" },
-                PEACH,
-                text_color,
-                sub_text,
-            ));
+    root = root.child(section_header("Vibration", sub_text)).child({
+        let can = gpui_mobile::packages::vibration::can_vibrate();
+        let mut card = info_card(card_bg).child(kv_row(
+            "Can Vibrate",
+            if can { "Yes" } else { "No" },
+            PEACH,
+            text_color,
+            sub_text,
+        ));
 
-            if can {
-                card = card.child(divider_line(divider_color)).child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .p_3()
-                        .child(haptic_button("Light", BLUE, cx.listener(|_this, _, _, cx| {
+        if can {
+            card = card.child(divider_line(divider_color)).child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .p_3()
+                    .child(haptic_button(
+                        "Light",
+                        BLUE,
+                        cx.listener(|_this, _, _, cx| {
                             let _ = gpui_mobile::packages::vibration::haptic_feedback(
                                 gpui_mobile::packages::vibration::HapticFeedback::Light,
                             );
                             cx.notify();
-                        })))
-                        .child(haptic_button("Medium", GREEN, cx.listener(|_this, _, _, cx| {
+                        }),
+                    ))
+                    .child(haptic_button(
+                        "Medium",
+                        GREEN,
+                        cx.listener(|_this, _, _, cx| {
                             let _ = gpui_mobile::packages::vibration::haptic_feedback(
                                 gpui_mobile::packages::vibration::HapticFeedback::Medium,
                             );
                             cx.notify();
-                        })))
-                        .child(haptic_button("Heavy", MAUVE, cx.listener(|_this, _, _, cx| {
+                        }),
+                    ))
+                    .child(haptic_button(
+                        "Heavy",
+                        MAUVE,
+                        cx.listener(|_this, _, _, cx| {
                             let _ = gpui_mobile::packages::vibration::haptic_feedback(
                                 gpui_mobile::packages::vibration::HapticFeedback::Heavy,
                             );
                             cx.notify();
-                        })))
-                        .child(haptic_button("Success", TEAL, cx.listener(|_this, _, _, cx| {
+                        }),
+                    ))
+                    .child(haptic_button(
+                        "Success",
+                        TEAL,
+                        cx.listener(|_this, _, _, cx| {
                             let _ = gpui_mobile::packages::vibration::haptic_feedback(
                                 gpui_mobile::packages::vibration::HapticFeedback::Success,
                             );
                             cx.notify();
-                        }))),
-                );
-            }
-            card
-        });
+                        }),
+                    )),
+            );
+        }
+        card
+    });
 
     // ── URL Launcher (JNI) ──────────────────────────────────────────────────
-    root = root
-        .child(section_header("URL Launcher", sub_text))
-        .child({
-            let can = gpui_mobile::packages::url_launcher::can_launch_url("https://zed.dev");
-            info_card(card_bg)
-                .child(kv_row(
-                    "Can open https://zed.dev",
-                    &format!("{:?}", can),
-                    BLUE,
-                    text_color,
-                    sub_text,
-                ))
-                .child(divider_line(divider_color))
-                .child(
+    root = root.child(section_header("URL Launcher", sub_text)).child({
+        let can = gpui_mobile::packages::url_launcher::can_launch_url("https://zed.dev");
+        info_card(card_bg)
+            .child(kv_row(
+                "Can open https://zed.dev",
+                &format!("{:?}", can),
+                BLUE,
+                text_color,
+                sub_text,
+            ))
+            .child(divider_line(divider_color))
+            .child(
+                div().p_3().child(
                     div()
-                        .p_3()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px_4()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgb(BLUE))
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .px_4()
-                                .py_2()
-                                .rounded_lg()
-                                .bg(rgb(BLUE))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(0x1e1e2e))
-                                        .child("Open zed.dev"),
-                                )
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(|_this, _, _, cx| {
-                                        let _ = gpui_mobile::packages::url_launcher::launch_url(
-                                            "https://zed.dev",
-                                        );
-                                        cx.notify();
-                                    }),
-                                ),
+                                .text_sm()
+                                .text_color(rgb(0x1e1e2e))
+                                .child("Open zed.dev"),
+                        )
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|_this, _, _, cx| {
+                                let _ = gpui_mobile::packages::url_launcher::launch_url(
+                                    "https://zed.dev",
+                                );
+                                cx.notify();
+                            }),
                         ),
-                )
-        });
+                ),
+            )
+    });
 
     // ── Battery ───────────────────────────────────────────────────────────────
-    root = root
-        .child(section_header("Battery", sub_text))
-        .child({
-            let bi = gpui_mobile::packages::battery::battery_info();
-            info_card(card_bg)
-                .child(kv_row("Level", &format!("{}%", bi.level), GREEN, text_color, sub_text))
-                .child(divider_line(divider_color))
-                .child(kv_row("State", &format!("{:?}", bi.state), GREEN, text_color, sub_text))
-                .child(divider_line(divider_color))
-                .child(kv_row(
-                    "Battery Saver",
-                    if bi.is_battery_save_mode { "On" } else { "Off" },
-                    GREEN,
-                    text_color,
-                    sub_text,
-                ))
-        });
+    root = root.child(section_header("Battery", sub_text)).child({
+        let bi = gpui_mobile::packages::battery::battery_info();
+        info_card(card_bg)
+            .child(kv_row(
+                "Level",
+                &format!("{}%", bi.level),
+                GREEN,
+                text_color,
+                sub_text,
+            ))
+            .child(divider_line(divider_color))
+            .child(kv_row(
+                "State",
+                &format!("{:?}", bi.state),
+                GREEN,
+                text_color,
+                sub_text,
+            ))
+            .child(divider_line(divider_color))
+            .child(kv_row(
+                "Battery Saver",
+                if bi.is_battery_save_mode { "On" } else { "Off" },
+                GREEN,
+                text_color,
+                sub_text,
+            ))
+    });
 
     // ── Sensors ───────────────────────────────────────────────────────────────
-    root = root
-        .child(section_header("Sensors", sub_text))
-        .child({
-            let avail = gpui_mobile::packages::sensors::available_sensors();
-            let mut card = info_card(card_bg)
-                .child(kv_row(
-                    "Accelerometer",
-                    if avail.accelerometer { "Available" } else { "N/A" },
-                    YELLOW,
-                    text_color,
-                    sub_text,
-                ))
-                .child(divider_line(divider_color))
-                .child(kv_row(
-                    "Gyroscope",
-                    if avail.gyroscope { "Available" } else { "N/A" },
-                    YELLOW,
-                    text_color,
-                    sub_text,
-                ))
-                .child(divider_line(divider_color))
-                .child(kv_row(
-                    "Magnetometer",
-                    if avail.magnetometer { "Available" } else { "N/A" },
-                    YELLOW,
-                    text_color,
-                    sub_text,
-                ))
-                .child(divider_line(divider_color))
-                .child(kv_row(
-                    "Barometer",
-                    if avail.barometer { "Available" } else { "N/A" },
-                    YELLOW,
-                    text_color,
-                    sub_text,
-                ));
+    root = root.child(section_header("Sensors", sub_text)).child({
+        let avail = gpui_mobile::packages::sensors::available_sensors();
+        let mut card = info_card(card_bg)
+            .child(kv_row(
+                "Accelerometer",
+                if avail.accelerometer {
+                    "Available"
+                } else {
+                    "N/A"
+                },
+                YELLOW,
+                text_color,
+                sub_text,
+            ))
+            .child(divider_line(divider_color))
+            .child(kv_row(
+                "Gyroscope",
+                if avail.gyroscope { "Available" } else { "N/A" },
+                YELLOW,
+                text_color,
+                sub_text,
+            ))
+            .child(divider_line(divider_color))
+            .child(kv_row(
+                "Magnetometer",
+                if avail.magnetometer {
+                    "Available"
+                } else {
+                    "N/A"
+                },
+                YELLOW,
+                text_color,
+                sub_text,
+            ))
+            .child(divider_line(divider_color))
+            .child(kv_row(
+                "Barometer",
+                if avail.barometer { "Available" } else { "N/A" },
+                YELLOW,
+                text_color,
+                sub_text,
+            ));
 
-            // Show live accelerometer reading if available
-            if let Some(accel) = gpui_mobile::packages::sensors::accelerometer() {
-                card = card
-                    .child(divider_line(divider_color))
-                    .child(kv_row(
-                        "Accel (m/s²)",
-                        &format!("x={:.1} y={:.1} z={:.1}", accel.x, accel.y, accel.z),
-                        YELLOW,
-                        text_color,
-                        sub_text,
-                    ));
-            }
-            card
-        });
+        // Show live accelerometer reading if available
+        if let Some(accel) = gpui_mobile::packages::sensors::accelerometer() {
+            card = card.child(divider_line(divider_color)).child(kv_row(
+                "Accel (m/s²)",
+                &format!("x={:.1} y={:.1} z={:.1}", accel.x, accel.y, accel.z),
+                YELLOW,
+                text_color,
+                sub_text,
+            ));
+        }
+        card
+    });
 
     // ── Share ─────────────────────────────────────────────────────────────────
-    root = root
-        .child(section_header("Share", sub_text))
-        .child({
-            info_card(card_bg)
-                .child(
-                    div()
-                        .p_3()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .px_4()
-                                .py_2()
-                                .rounded_lg()
-                                .bg(rgb(TEAL))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(0x1e1e2e))
-                                        .child("Share \"Hello from GPUI!\""),
-                                )
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(|_this, _, _, cx| {
-                                        let _ = gpui_mobile::packages::share::share_text(
-                                            "Hello from GPUI!",
-                                            Some("GPUI Demo"),
-                                        );
-                                        cx.notify();
-                                    }),
-                                ),
-                        ),
-                )
-        });
-
-    // ── WebView ───────────────────────────────────────────────────────────────
-    root = root
-        .child(section_header("WebView", sub_text))
-        .child({
-            info_card(card_bg).child(
+    root = root.child(section_header("Share", sub_text)).child({
+        info_card(card_bg).child(
+            div().p_3().child(
                 div()
-                    .p_3()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .px_4()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(rgb(TEAL))
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .px_4()
-                            .py_3()
-                            .rounded_lg()
-                            .bg(rgb(MAUVE))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0xFFFFFF))
-                                    .child("Open In-App Browser"),
-                            )
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.navigate_to(super::Screen::WebViewBrowser);
-                                    cx.notify();
-                                }),
-                            ),
+                            .text_sm()
+                            .text_color(rgb(0x1e1e2e))
+                            .child("Share \"Hello from GPUI!\""),
+                    )
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_this, _, _, cx| {
+                            let _ = gpui_mobile::packages::share::share_text(
+                                "Hello from GPUI!",
+                                Some("GPUI Demo"),
+                            );
+                            cx.notify();
+                        }),
                     ),
-            )
-        });
+            ),
+        )
+    });
+
+    // ── WebView ───────────────────────────────────────────────────────────────
+    root = root.child(section_header("WebView", sub_text)).child({
+        info_card(card_bg).child(
+            div().p_3().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .px_4()
+                    .py_3()
+                    .rounded_lg()
+                    .bg(rgb(MAUVE))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xFFFFFF))
+                            .child("Open In-App Browser"),
+                    )
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.navigate_to(super::Screen::WebViewBrowser);
+                            cx.notify();
+                        }),
+                    ),
+            ),
+        )
+    });
 
     // ── File Selector ────────────────────────────────────────────────────────
     root = root
@@ -1158,88 +1226,100 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
         });
 
     // ── Audio Player ─────────────────────────────────────────────────────────
-    root = root
-        .child(section_header("Audio Player", sub_text))
-        .child({
-            let audio_st = PACKAGES_STATE.with(|s| {
-                s.borrow().audio_status.as_deref().unwrap_or("No player").to_string()
-            });
-            info_card(card_bg)
-                .child(kv_row("Status", &audio_st, TEAL, text_color, sub_text))
-                .child(divider_line(divider_color))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .p_3()
-                        .child(
-                            action_button("Create", TEAL, cx.listener(|_this, _, _, cx| {
-                                PACKAGES_STATE.with(|s| {
-                                    let mut state = s.borrow_mut();
-                                    match gpui_mobile::packages::audio::AudioPlayer::new() {
-                                        Ok(p) => {
-                                            state.audio_status = Some("Player created".into());
-                                            std::mem::forget(p); // leak for demo simplicity
-                                        }
-                                        Err(e) => state.audio_status = Some(format!("Error: {e}")),
-                                    }
-                                });
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            action_button("Info", BLUE, cx.listener(|_this, _, _, cx| {
-                                PACKAGES_STATE.with(|s| {
-                                    s.borrow_mut().audio_status = Some("Audio API ready".into());
-                                });
-                                cx.notify();
-                            })),
-                        ),
-                )
+    root = root.child(section_header("Audio Player", sub_text)).child({
+        let audio_st = PACKAGES_STATE.with(|s| {
+            s.borrow()
+                .audio_status
+                .as_deref()
+                .unwrap_or("No player")
+                .to_string()
         });
+        info_card(card_bg)
+            .child(kv_row("Status", &audio_st, TEAL, text_color, sub_text))
+            .child(divider_line(divider_color))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .p_3()
+                    .child(action_button(
+                        "Create",
+                        TEAL,
+                        cx.listener(|_this, _, _, cx| {
+                            PACKAGES_STATE.with(|s| {
+                                let mut state = s.borrow_mut();
+                                match gpui_mobile::packages::audio::AudioPlayer::new() {
+                                    Ok(p) => {
+                                        state.audio_status = Some("Player created".into());
+                                        std::mem::forget(p); // leak for demo simplicity
+                                    }
+                                    Err(e) => state.audio_status = Some(format!("Error: {e}")),
+                                }
+                            });
+                            cx.notify();
+                        }),
+                    ))
+                    .child(action_button(
+                        "Info",
+                        BLUE,
+                        cx.listener(|_this, _, _, cx| {
+                            PACKAGES_STATE.with(|s| {
+                                s.borrow_mut().audio_status = Some("Audio API ready".into());
+                            });
+                            cx.notify();
+                        }),
+                    )),
+            )
+    });
 
     // ── Video Player ─────────────────────────────────────────────────────────
-    root = root
-        .child(section_header("Video Player", sub_text))
-        .child({
-            let video_st = PACKAGES_STATE.with(|s| {
-                s.borrow().video_status.as_deref().unwrap_or("No player").to_string()
-            });
-            info_card(card_bg)
-                .child(kv_row("Status", &video_st, MAUVE, text_color, sub_text))
-                .child(divider_line(divider_color))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .p_3()
-                        .child(
-                            action_button("Create", MAUVE, cx.listener(|_this, _, _, cx| {
-                                PACKAGES_STATE.with(|s| {
-                                    let mut state = s.borrow_mut();
-                                    match gpui_mobile::packages::video_player::VideoPlayer::new() {
-                                        Ok(p) => {
-                                            state.video_status = Some("Player created".into());
-                                            std::mem::forget(p); // leak for demo simplicity
-                                        }
-                                        Err(e) => state.video_status = Some(format!("Error: {e}")),
-                                    }
-                                });
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            action_button("Info", GREEN, cx.listener(|_this, _, _, cx| {
-                                PACKAGES_STATE.with(|s| {
-                                    s.borrow_mut().video_status = Some("Video API ready".into());
-                                });
-                                cx.notify();
-                            })),
-                        ),
-                )
+    root = root.child(section_header("Video Player", sub_text)).child({
+        let video_st = PACKAGES_STATE.with(|s| {
+            s.borrow()
+                .video_status
+                .as_deref()
+                .unwrap_or("No player")
+                .to_string()
         });
+        info_card(card_bg)
+            .child(kv_row("Status", &video_st, MAUVE, text_color, sub_text))
+            .child(divider_line(divider_color))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .p_3()
+                    .child(action_button(
+                        "Create",
+                        MAUVE,
+                        cx.listener(|_this, _, _, cx| {
+                            PACKAGES_STATE.with(|s| {
+                                let mut state = s.borrow_mut();
+                                match gpui_mobile::packages::video_player::VideoPlayer::new() {
+                                    Ok(p) => {
+                                        state.video_status = Some("Player created".into());
+                                        std::mem::forget(p); // leak for demo simplicity
+                                    }
+                                    Err(e) => state.video_status = Some(format!("Error: {e}")),
+                                }
+                            });
+                            cx.notify();
+                        }),
+                    ))
+                    .child(action_button(
+                        "Info",
+                        GREEN,
+                        cx.listener(|_this, _, _, cx| {
+                            PACKAGES_STATE.with(|s| {
+                                s.borrow_mut().video_status = Some("Video API ready".into());
+                            });
+                            cx.notify();
+                        }),
+                    )),
+            )
+    });
 
     root
 }
@@ -1284,7 +1364,13 @@ fn error_card(msg: &str, bg: u32, text_color: u32) -> impl IntoElement {
     )
 }
 
-fn kv_row(label: &str, value: &str, accent: u32, text_color: u32, sub_text: u32) -> impl IntoElement {
+fn kv_row(
+    label: &str,
+    value: &str,
+    accent: u32,
+    text_color: u32,
+    sub_text: u32,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_row()

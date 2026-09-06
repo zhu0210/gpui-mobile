@@ -33,7 +33,7 @@ pub(crate) struct IosPlatformState {
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
     finish_launching: Option<Box<dyn FnOnce()>>,
-    quit_callback: Option<Box<dyn FnMut()>>,
+    quit_callback: Option<Box<dyn FnMut() -> bool>>,
     open_urls_callback: Option<Box<dyn FnMut(Vec<String>)>>,
     thermal_state_callback: Option<Box<dyn FnMut()>>,
 }
@@ -119,7 +119,7 @@ impl Platform for IosPlatform {
         log::warn!("iOS apps cannot programmatically quit");
     }
 
-    fn restart(&self, _binary_path: Option<PathBuf>) {
+    fn restart(&self, _binary_path: Option<PathBuf>, _arguments: Vec<std::ffi::OsString>) {
         // iOS apps cannot restart themselves
         log::warn!("iOS apps cannot restart themselves");
     }
@@ -239,7 +239,7 @@ impl Platform for IosPlatform {
         // Would use UIDocumentInteractionController or UIActivityViewController
     }
 
-    fn on_quit(&self, callback: Box<dyn FnMut()>) {
+    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         self.0.lock().quit_callback = Some(callback);
     }
 
@@ -288,6 +288,14 @@ impl Platform for IosPlatform {
 
     fn set_cursor_style(&self, _style: CursorStyle) {
         // iOS doesn't have visible cursors (except for Apple Pencil hover on iPad)
+    }
+
+    fn on_system_wake(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn hide_cursor_until_mouse_moves(&self) {}
+
+    fn is_cursor_visible(&self) -> bool {
+        false
     }
 
     fn should_auto_hide_scrollbars(&self) -> bool {

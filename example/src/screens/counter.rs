@@ -5,7 +5,10 @@
 
 use gpui::{div, prelude::*, rgb, App, MouseDownEvent, Window};
 
-use super::{Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_SUBTEXT, LIGHT_TEXT, MANTLE, MAUVE, PEACH, RED, SURFACE0, SURFACE1, TEXT, YELLOW};
+use super::{
+    Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_SUBTEXT, LIGHT_TEXT, MANTLE, MAUVE, PEACH, RED,
+    SURFACE0, SURFACE1, TEXT, YELLOW,
+};
 
 /// Render the Counter screen content area.
 ///
@@ -15,7 +18,11 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
     let tap_count = router.tap_count;
     let dark_mode = router.dark_mode;
     let text_color = if dark_mode { TEXT } else { LIGHT_TEXT };
-    let sub_text = if dark_mode { super::SUBTEXT } else { LIGHT_SUBTEXT };
+    let sub_text = if dark_mode {
+        super::SUBTEXT
+    } else {
+        LIGHT_SUBTEXT
+    };
     let card_bg = if dark_mode { SURFACE0 } else { LIGHT_CARD_BG };
 
     // Determine the accent colour based on the count value.

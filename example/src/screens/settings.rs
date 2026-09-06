@@ -5,7 +5,10 @@
 
 use gpui::{div, prelude::*, px, rgb, App, MouseDownEvent, Window};
 
-use super::{Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_DIVIDER, LIGHT_SUBTEXT, LIGHT_TEXT, MANTLE, MAUVE, PEACH, RED, SURFACE0, SURFACE1, TEXT, YELLOW};
+use super::{
+    Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_DIVIDER, LIGHT_SUBTEXT, LIGHT_TEXT, MANTLE, MAUVE,
+    PEACH, RED, SURFACE0, SURFACE1, TEXT, YELLOW,
+};
 
 /// Render the Settings screen content area.
 ///
@@ -14,7 +17,11 @@ use super::{Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_DIVIDER, LIGHT_SUBTEXT, LI
 pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoElement {
     let dark_mode = router.dark_mode;
     let text_color = if dark_mode { TEXT } else { LIGHT_TEXT };
-    let sub_text = if dark_mode { super::SUBTEXT } else { LIGHT_SUBTEXT };
+    let sub_text = if dark_mode {
+        super::SUBTEXT
+    } else {
+        LIGHT_SUBTEXT
+    };
     let card_bg = if dark_mode { SURFACE0 } else { LIGHT_CARD_BG };
     let divider_color = if dark_mode { SURFACE1 } else { LIGHT_DIVIDER };
 

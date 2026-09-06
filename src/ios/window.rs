@@ -609,10 +609,7 @@ impl IosWindow {
 
             let metal_instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::METAL,
-                flags: wgpu::InstanceFlags::default(),
-                backend_options: wgpu::BackendOptions::default(),
-                memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-                display: None,
+                ..Default::default()
             });
 
             let raw_window = RawIosWindow {
@@ -1599,6 +1596,10 @@ impl PlatformWindow for IosWindow {
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         let guard = self.renderer.lock();
         guard.as_ref().map(|r| r.gpu_specs())
+    }
+
+    fn gpu_context(&self) -> Option<gpui::WgpuContextHandle> {
+        self.renderer.lock().as_ref()?.gpu_context_handle()
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {

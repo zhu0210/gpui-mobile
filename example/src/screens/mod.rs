@@ -25,7 +25,6 @@ pub mod settings;
 pub mod swiper;
 pub mod video_player;
 pub mod webview_browser;
-
 use crate::demos::{AnimationPlayground, ShaderShowcase};
 use gpui::{
     div, point, prelude::*, px, rgb, size, Bounds, Context, MouseButton, MouseDownEvent,
@@ -134,21 +133,21 @@ impl Screen {
 
 // ── Colour palette (Google Material) ─────────────────────────────────────────
 
-pub const BASE: u32 = 0x121318;        // Dark surface
-pub const SURFACE0: u32 = 0x1E1F25;   // Dark surface container
-pub const SURFACE1: u32 = 0x282A2F;   // Dark surface container high
-pub const TEXT: u32 = 0xE2E2E9;       // Dark on-surface
-pub const SUBTEXT: u32 = 0xC4C6D0;    // Dark on-surface-variant
-pub const BLUE: u32 = 0x4285F4;       // Google Blue
-pub const GREEN: u32 = 0x34A853;      // Google Green
-pub const RED: u32 = 0xEA4335;        // Google Red
-pub const MAUVE: u32 = 0xA142F4;      // Google Purple
-pub const YELLOW: u32 = 0xFBBC04;     // Google Yellow
-pub const PEACH: u32 = 0xFA7B17;      // Google Orange
-pub const TEAL: u32 = 0x24C1E0;       // Google Teal
-pub const MANTLE: u32 = 0x0D0E13;     // Dark surface container lowest
-pub const SKY: u32 = 0x4FC3F7;        // Light Blue
-pub const LAVENDER: u32 = 0x7B8CF8;   // Indigo light
+pub const BASE: u32 = 0x121318; // Dark surface
+pub const SURFACE0: u32 = 0x1E1F25; // Dark surface container
+pub const SURFACE1: u32 = 0x282A2F; // Dark surface container high
+pub const TEXT: u32 = 0xE2E2E9; // Dark on-surface
+pub const SUBTEXT: u32 = 0xC4C6D0; // Dark on-surface-variant
+pub const BLUE: u32 = 0x4285F4; // Google Blue
+pub const GREEN: u32 = 0x34A853; // Google Green
+pub const RED: u32 = 0xEA4335; // Google Red
+pub const MAUVE: u32 = 0xA142F4; // Google Purple
+pub const YELLOW: u32 = 0xFBBC04; // Google Yellow
+pub const PEACH: u32 = 0xFA7B17; // Google Orange
+pub const TEAL: u32 = 0x24C1E0; // Google Teal
+pub const MANTLE: u32 = 0x0D0E13; // Dark surface container lowest
+pub const SKY: u32 = 0x4FC3F7; // Light Blue
+pub const LAVENDER: u32 = 0x7B8CF8; // Indigo light
 
 // Light mode equivalents (used inline in screen render functions).
 pub const LIGHT_TEXT: u32 = 0x1A1B20;
@@ -192,7 +191,6 @@ pub struct Router {
     animation_playground: Option<AnimationPlayground>,
     /// The shader showcase demo (lazily created when the screen is visited).
     shader_showcase: Option<ShaderShowcase>,
-
 }
 
 impl Router {
@@ -264,7 +262,12 @@ impl Router {
         {
             let (top, bottom, left, right) = gpui_mobile::safe_area_insets();
             if top > 0.0 || bottom > 0.0 {
-                return SafeArea { top, bottom, left, right };
+                return SafeArea {
+                    top,
+                    bottom,
+                    left,
+                    right,
+                };
             }
             // Fallback for before the window is ready
             return SafeArea {
@@ -358,9 +361,10 @@ impl Router {
 
 impl Render for Router {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        log::info!("Router: render() screen={:?}", self.current_screen);
+        log::trace!("Router: render() screen={:?}", self.current_screen);
         let show_tab_bar = self.current_screen.is_tab_root();
-        let theme = gpui_mobile::components::material::MaterialTheme::from_appearance(self.dark_mode);
+        let theme =
+            gpui_mobile::components::material::MaterialTheme::from_appearance(self.dark_mode);
         let bg_color = theme.surface;
         let text_color = theme.on_surface;
         let safe_top = self.safe_area.top;
@@ -389,9 +393,9 @@ impl Render for Router {
             // ── Screen content ───────────────────────────────────────────
             .child(self.render_current_screen(window, cx))
             // ── Bottom tab bar (only for tab-root screens) ───────────────
-            .when(show_tab_bar, |d| {
-                d.child(self.render_tab_bar(cx))
-            })
+            // .when(show_tab_bar, |d| {
+            .child(self.render_tab_bar(cx))
+            // })
             // ── Bottom safe-area spacer (nav bar / gesture indicator) ────
             .when(safe_bottom > 0.0 && show_tab_bar, |d| {
                 d.child(div().w_full().h(px(safe_bottom)).bg(rgb(bottom_color)))
@@ -406,8 +410,10 @@ impl Router {
     /// Default: dark mode → dark status bar with light text; light mode → light
     /// status bar with dark text. Fullscreen demo screens override to dark chrome.
     fn system_chrome_style(&self) -> SystemChromeStyle {
-        let is_fullscreen_demo = matches!(self.current_screen, Screen::Animations | Screen::Shaders);
-        let theme = gpui_mobile::components::material::MaterialTheme::from_appearance(self.dark_mode);
+        let is_fullscreen_demo =
+            matches!(self.current_screen, Screen::Animations | Screen::Shaders);
+        let theme =
+            gpui_mobile::components::material::MaterialTheme::from_appearance(self.dark_mode);
 
         if is_fullscreen_demo {
             SystemChromeStyle {
@@ -469,7 +475,9 @@ impl Router {
     ) -> impl IntoElement {
         match self.current_screen {
             Screen::Animations => {
-                return self.render_animations_content(window, cx).into_any_element();
+                return self
+                    .render_animations_content(window, cx)
+                    .into_any_element();
             }
             Screen::Shaders => {
                 return self.render_shaders_content(window, cx).into_any_element();
@@ -494,33 +502,45 @@ impl Router {
             Screen::VideoPlayer => {
                 // Video player has its own layout with fixed video area + scrollable controls.
                 // Rendered directly in render_current_screen to bypass the scroll wrapper.
-                return self.render_video_player_screen(window, cx).into_any_element();
+                return self
+                    .render_video_player_screen(window, cx)
+                    .into_any_element();
             }
             Screen::Animations | Screen::Shaders => unreachable!(),
         };
 
         div()
-            .id("screen-scroll-container")
+            .id("screen-content-container")
             .flex_1()
-            .overflow_y_scroll()
-            // Dismiss keyboard when tapping outside text input fields.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
-                    let form_had_focus = form::has_focused_field();
-                    let chat_had_focus = chat::CHAT_STATE.with(|s| s.borrow().focused);
-                    if form_had_focus {
-                        form::dismiss_form_keyboard();
-                    }
-                    if chat_had_focus {
-                        chat::dismiss_chat();
-                    }
-                    if form_had_focus || chat_had_focus {
-                        cx.notify();
-                    }
-                }),
+            .min_h_0()
+            .w_full()
+            .child(
+                div()
+                    .id("screen-scroll-container")
+                    .size_full()
+                    .overflow_y_scroll()
+                    // Dismiss keyboard when tapping outside text input fields.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
+                            let form_had_focus = form::has_focused_field();
+                            let chat_had_focus = chat::CHAT_STATE.with(|s| s.borrow().focused);
+
+                            if form_had_focus {
+                                form::dismiss_form_keyboard();
+                            }
+
+                            if chat_had_focus {
+                                chat::dismiss_chat();
+                            }
+
+                            if form_had_focus || chat_had_focus {
+                                cx.notify();
+                            }
+                        }),
+                    )
+                    .child(screen_content),
             )
-            .child(screen_content)
             .into_any_element()
     }
 
@@ -626,7 +646,11 @@ impl Router {
         audio_player::render(self, cx)
     }
 
-    fn render_video_player_screen(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_video_player_screen(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         video_player::render(self, window, cx)
     }
 
@@ -668,18 +692,16 @@ impl Router {
                     }
                 }),
             )
-            .on_mouse_move(
-                cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                    if let Some(playground) = &mut this.animation_playground {
-                        let pos = point(event.position.x.as_f32(), event.position.y.as_f32());
-                        if playground.touch_start.is_none() {
-                            playground.touch_start = Some((pos, std::time::Instant::now()));
-                        }
-                        playground.current_touch = Some(pos);
-                        cx.notify();
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if let Some(playground) = &mut this.animation_playground {
+                    let pos = point(event.position.x.as_f32(), event.position.y.as_f32());
+                    if playground.touch_start.is_none() {
+                        playground.touch_start = Some((pos, std::time::Instant::now()));
                     }
-                }),
-            )
+                    playground.current_touch = Some(pos);
+                    cx.notify();
+                }
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _window, cx| {
@@ -773,4 +795,3 @@ impl Router {
             })
     }
 }
-

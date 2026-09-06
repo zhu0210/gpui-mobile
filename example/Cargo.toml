@@ -6,8 +6,8 @@ description = "Cross-platform GPUI example app for Android and iOS"
 publish = false
 
 [lib]
+crate-type = ["cdylib", "lib", "staticlib"]
 name = "gpui_mobile_example"
-crate-type = ["cdylib", "staticlib", "lib"]
 path = "src/lib.rs"
 
 [[bin]]
@@ -15,29 +15,40 @@ name = "gpui-example"
 path = "src/main.rs"
 
 [dependencies]
+gpui = { package = "gpui", git = "https://github.com/zhu0210/zed.git", rev = "0d48c8ecf7d4e08730eb10f72706bdff2499e416", default-features = false }
 gpui-mobile = { path = ".." }
-gpui = { git = "https://github.com/zed-industries/zed", rev = "5688167d224b5eca54875d49afb8bfd73a07915a", package = "gpui", default-features = false }
-reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "5688167d224b5eca54875d49afb8bfd73a07915a", package = "reqwest_client" }
-reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", package = "zed-reqwest", default-features = false, features = ["rustls-tls"] }
 log = "0.4"
+reqwest = { package = "zed-reqwest", git = "https://github.com/zed-industries/reqwest.git", rev = "33bc764aa15ff7b200bf7c93bd96e24878d53e14", default-features = false, features = [
+  "charset",
+  "http2",
+  "macos-system-configuration",
+  "multipart",
+  "rustls-tls-webpki-roots",
+  "socks",
+  "stream",
+] }
+reqwest_client = { git = "https://github.com/zhu0210/zed.git", rev = "0d48c8ecf7d4e08730eb10f72706bdff2499e416" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
 
-[target.'cfg(target_os = "android")'.dependencies]
-android_logger = "0.15"
-android-activity = { version = "0.6", features = ["native-activity"] }
-
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
-
-[profile.release]
-opt-level = "z"
-lto = "fat"
-codegen-units = 1
-strip = true
-panic = "abort"
 
 [profile.dev]
 opt-level = 0
 debug = true
+
+[profile.release]
+opt-level = "z"
+strip = true
+lto = "fat"
+panic = "abort"
+codegen-units = 1
+
+[patch."https://github.com/zed-industries/zed"]
+gpui = { version = "=0.2.2", git = "https://github.com/zhu0210/zed.git", rev = "0d48c8ecf7d4e08730eb10f72706bdff2499e416" }

@@ -1,16 +1,18 @@
 name: CI — Build & Test
 
 on:
+  workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, "codex/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "codex/**"]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
+  RUSTUP_TOOLCHAIN: stable
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
@@ -49,8 +51,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings || true
-        # clippy warnings are informational for now; don't fail the build
+        run: cargo clippy --all-targets -- -D warnings
 
   # ─────────────────────────────────────────────────────────────────────────────
   # iOS cross-compilation
@@ -112,23 +113,11 @@ jobs:
 
       - name: Resolve NDK path
         run: |
-          # Use the NDK provided by setup-android (ANDROID_NDK_ROOT)
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
+          sdkmanager "ndk;29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
-      - name: Add NDK toolchain to PATH
-        run: |
-          TOOLCHAIN_DIR="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          echo "$TOOLCHAIN_DIR" >> "$GITHUB_PATH"
-          ls "$TOOLCHAIN_DIR"/aarch64-linux-android*-clang || true
-
-      - name: Configure Cargo for Android cross-compilation
-        run: |
-          mkdir -p .cargo
-          cat >> .cargo/config.toml <<'EOF'
-          [target.aarch64-linux-android]
-          linker = "aarch64-linux-android35-clang"
-          EOF
-          cat .cargo/config.toml
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
 
       - name: Cache Cargo registry + git deps
         uses: actions/cache@v5
@@ -141,11 +130,11 @@ jobs:
           restore-keys: android-cargo-
 
       - name: cargo check — gpui-mobile (Android aarch64)
-        run: cargo check --target aarch64-linux-android
+        run: cargo ndk -t arm64-v8a check --locked
 
       - name: cargo check — example app (Android aarch64)
         working-directory: example
-        run: cargo check --target aarch64-linux-android
+        run: cargo ndk -t arm64-v8a check --locked
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Android APK build (Gradle)
@@ -172,7 +161,8 @@ jobs:
 
       - name: Resolve NDK path
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
+          sdkmanager "ndk;29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5

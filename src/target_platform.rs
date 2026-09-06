@@ -110,19 +110,19 @@ pub fn target_platform() -> TargetPlatform {
     }
     #[cfg(target_os = "macos")]
     {
-        return TargetPlatform::MacOS;
+        TargetPlatform::MacOS
     }
     #[cfg(target_os = "linux")]
     {
-        return TargetPlatform::Linux;
+        TargetPlatform::Linux
     }
     #[cfg(target_os = "windows")]
     {
-        return TargetPlatform::Windows;
+        TargetPlatform::Windows
     }
     #[cfg(target_arch = "wasm32")]
     {
-        return TargetPlatform::Web;
+        TargetPlatform::Web
     }
 
     #[cfg(not(any(

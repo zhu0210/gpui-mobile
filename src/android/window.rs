@@ -1825,10 +1825,6 @@ impl PlatformWindow for AndroidPlatformWindow {
         self.window.draw(scene);
     }
 
-    fn completed_frame(&self) {
-        // No-op — frame completion is handled by wgpu's present.
-    }
-
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.window
             .sprite_atlas()
@@ -1841,6 +1837,43 @@ impl PlatformWindow for AndroidPlatformWindow {
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         self.window.gpu_specs()
+    }
+
+    fn gpu_context(&self) -> Option<gpui::WgpuContextHandle> {
+        self.window
+            .state
+            .lock()
+            .renderer
+            .as_ref()?
+            .gpu_context_handle()
+    }
+
+    fn submit_external_frame(
+        &self,
+        request: gpui::ExternalFrameRequest,
+    ) -> gpui::ExternalFrameOutcome {
+        let mut state = self.window.state.lock();
+        match state.renderer.as_mut() {
+            Some(renderer) => renderer.submit_external_frame_request(request),
+            None => gpui::ExternalFrameOutcome::TransientFailure,
+        }
+    }
+
+    fn take_external_frame_outcome(&self) -> Option<gpui::ExternalFrameOutcome> {
+        self.window
+            .state
+            .lock()
+            .renderer
+            .as_mut()?
+            .take_external_frame_outcome()
+    }
+
+    fn clear_external_frame(&self) -> gpui::ExternalFrameOutcome {
+        let mut state = self.window.state.lock();
+        match state.renderer.as_mut() {
+            Some(renderer) => renderer.clear_external_frame(),
+            None => gpui::ExternalFrameOutcome::Accepted,
+        }
     }
 
     fn update_ime_position(&self, bounds: gpui::Bounds<gpui::Pixels>) {

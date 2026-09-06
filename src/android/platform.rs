@@ -146,7 +146,7 @@ struct AndroidPlatformState {
     finish_launching: Option<Box<dyn FnOnce() + Send>>,
 
     /// Called when the app is about to quit.
-    quit_callback: Option<Box<dyn FnMut() + Send>>,
+    quit_callback: Option<Box<dyn FnMut() -> bool + Send>>,
 
     /// Called when the app is re-opened (e.g. tapped in the recents screen
     /// while already running).
@@ -514,18 +514,15 @@ impl AndroidPlatform {
     /// Sets the `should_quit` flag; the main loop will exit on the next tick.
     /// Invokes the registered quit callback before returning.
     pub fn quit(&self) {
-        log::info!("AndroidPlatform::quit");
-        self.should_quit.store(true, Ordering::SeqCst);
-
-        let cb = self.state.lock().quit_callback.as_mut().map(|cb| {
-            // We cannot move out of an `&mut FnMut`, so we call it in place.
-            cb as *mut Box<dyn FnMut() + Send>
-        });
-
-        if let Some(cb_ptr) = cb {
-            // SAFETY: The pointer is valid for the duration of this call
-            // because we hold the lock-guard's lifetime indirectly.
-            unsafe { (*cb_ptr)() };
+        // Move the callback out before invoking it: callbacks may reenter the platform.
+        let callback = self.state.lock().quit_callback.take();
+        let mut accepted = true;
+        if let Some(mut callback) = callback {
+            accepted = callback();
+            self.state.lock().quit_callback.get_or_insert(callback);
+        }
+        if accepted {
+            self.should_quit.store(true, Ordering::SeqCst);
         }
     }
 
@@ -549,22 +546,31 @@ impl AndroidPlatform {
     /// Deliver URLs from an implicit or explicit intent.
     pub fn deliver_open_urls(&self, urls: Vec<String>) {
         log::debug!("AndroidPlatform: delivering {} URL(s)", urls.len());
-        if let Some(cb) = self.state.lock().open_urls_callback.as_mut() {
-            cb(urls);
+        let callback = self.state.lock().open_urls_callback.take();
+        if let Some(mut callback) = callback {
+            callback(urls);
+            self.state.lock().open_urls_callback.get_or_insert(callback);
         }
     }
 
     /// Notify the platform that the keyboard layout has changed.
     pub fn notify_keyboard_layout_change(&self) {
-        if let Some(cb) = self.state.lock().keyboard_layout_callback.as_mut() {
-            cb();
+        let callback = self.state.lock().keyboard_layout_callback.take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.state
+                .lock()
+                .keyboard_layout_callback
+                .get_or_insert(callback);
         }
     }
 
     /// Deliver a "reopen" event (app tapped in recents while already running).
     pub fn deliver_reopen(&self) {
-        if let Some(cb) = self.state.lock().reopen_callback.as_mut() {
-            cb();
+        let callback = self.state.lock().reopen_callback.take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.state.lock().reopen_callback.get_or_insert(callback);
         }
     }
 
@@ -893,11 +899,14 @@ impl AndroidPlatform {
     // ── callback registration ─────────────────────────────────────────────────
 
     /// Register a callback invoked when the app is about to quit.
-    pub fn on_quit<F>(&self, cb: F)
+    pub fn on_quit<F>(&self, mut cb: F)
     where
         F: FnMut() + Send + 'static,
     {
-        self.state.lock().quit_callback = Some(Box::new(cb));
+        self.state.lock().quit_callback = Some(Box::new(move || {
+            cb();
+            true
+        }));
     }
 
     /// Register a callback invoked when the app is re-opened.
@@ -975,24 +984,10 @@ impl Platform for AndroidPlatform {
     }
 
     fn quit(&self) {
-        log::info!("AndroidPlatform::quit");
-        self.should_quit.store(true, Ordering::SeqCst);
-
-        let cb = self
-            .state
-            .lock()
-            .quit_callback
-            .as_mut()
-            .map(|cb| cb as *mut Box<dyn FnMut() + Send>);
-
-        if let Some(cb_ptr) = cb {
-            // SAFETY: pointer is valid for the duration of this call because
-            // we hold the lock-guard's lifetime indirectly.
-            unsafe { (*cb_ptr)() };
-        }
+        AndroidPlatform::quit(self);
     }
 
-    fn restart(&self, _binary_path: Option<PathBuf>) {
+    fn restart(&self, _binary_path: Option<PathBuf>, _arguments: Vec<std::ffi::OsString>) {
         log::warn!("AndroidPlatform::restart — not supported on Android");
     }
 
@@ -1122,9 +1117,11 @@ impl Platform for AndroidPlatform {
         log::info!("AndroidPlatform::open_with_system — Intent launch not yet implemented");
     }
 
-    fn on_quit(&self, callback: Box<dyn FnMut()>) {
+    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         self.state.lock().quit_callback = Some(unsafe {
-            std::mem::transmute::<Box<dyn FnMut()>, Box<dyn FnMut() + Send>>(callback)
+            std::mem::transmute::<Box<dyn FnMut() -> bool>, Box<dyn FnMut() -> bool + Send>>(
+                callback,
+            )
         });
     }
 
@@ -1181,6 +1178,14 @@ impl Platform for AndroidPlatform {
 
     fn set_cursor_style(&self, _style: CursorStyle) {
         // No-op: Android uses touch, not mouse cursors.
+    }
+
+    fn on_system_wake(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn hide_cursor_until_mouse_moves(&self) {}
+
+    fn is_cursor_visible(&self) -> bool {
+        false
     }
 
     fn should_auto_hide_scrollbars(&self) -> bool {
@@ -1307,8 +1312,8 @@ impl Platform for SharedPlatform {
     fn quit(&self) {
         <AndroidPlatform as Platform>::quit(&self.0)
     }
-    fn restart(&self, binary_path: Option<PathBuf>) {
-        <AndroidPlatform as Platform>::restart(&self.0, binary_path)
+    fn restart(&self, binary_path: Option<PathBuf>, arguments: Vec<std::ffi::OsString>) {
+        <AndroidPlatform as Platform>::restart(&self.0, binary_path, arguments)
     }
     fn activate(&self, ignoring_other_apps: bool) {
         <AndroidPlatform as Platform>::activate(&self.0, ignoring_other_apps)
@@ -1372,7 +1377,7 @@ impl Platform for SharedPlatform {
     fn open_with_system(&self, path: &Path) {
         <AndroidPlatform as Platform>::open_with_system(&self.0, path)
     }
-    fn on_quit(&self, callback: Box<dyn FnMut()>) {
+    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         <AndroidPlatform as Platform>::on_quit(&self.0, callback)
     }
     fn on_reopen(&self, callback: Box<dyn FnMut()>) {
@@ -1408,6 +1413,14 @@ impl Platform for SharedPlatform {
     fn set_cursor_style(&self, style: CursorStyle) {
         <AndroidPlatform as Platform>::set_cursor_style(&self.0, style)
     }
+    fn on_system_wake(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn hide_cursor_until_mouse_moves(&self) {}
+
+    fn is_cursor_visible(&self) -> bool {
+        false
+    }
+
     fn should_auto_hide_scrollbars(&self) -> bool {
         <AndroidPlatform as Platform>::should_auto_hide_scrollbars(&self.0)
     }
@@ -1494,6 +1507,23 @@ mod tests {
         });
         p.quit();
         assert!(fired.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn quit_callback_can_reenter_and_veto() {
+        let platform = std::rc::Rc::new(headless());
+        let weak = std::rc::Rc::downgrade(&platform);
+        <AndroidPlatform as Platform>::on_quit(
+            &platform,
+            Box::new(move || {
+                assert!(!weak.upgrade().unwrap().should_quit());
+                weak.upgrade().unwrap().did_become_active();
+                false
+            }),
+        );
+        platform.quit();
+        assert!(!platform.should_quit());
+        assert!(platform.is_active());
     }
 
     #[test]

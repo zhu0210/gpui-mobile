@@ -4,7 +4,7 @@
 use gpui::{div, prelude::*, px, rgb, Context, MouseDownEvent};
 use gpui_mobile::components::material::{
     Card, Checkbox, CircularProgressIndicator, FilledButton, MaterialTheme, OutlinedButton, Radio,
-    RadioGroup, Slider, Switch, TextButton, TextInput, TextField,
+    RadioGroup, Slider, Switch, TextButton, TextField, TextInput,
 };
 use gpui_mobile::KeyboardType;
 use std::cell::RefCell;
@@ -16,7 +16,7 @@ use super::Router;
 pub struct FormState {
     pub notifications: bool,
     pub auto_update: bool,
-    pub account_type: u8, // 0=personal, 1=business, 2=education
+    pub account_type: u8,     // 0=personal, 1=business, 2=education
     pub interests: [bool; 4], // tech, design, science, music
     pub skill_level: f32,
     pub experience: f32,
@@ -200,7 +200,11 @@ pub fn render(router: &Router, cx: &mut Context<Router>) -> impl IntoElement {
 
     let dark = router.dark_mode;
     let theme = MaterialTheme::from_appearance(dark);
-    let sub_text: u32 = if dark { super::SUBTEXT } else { super::LIGHT_SUBTEXT };
+    let sub_text: u32 = if dark {
+        super::SUBTEXT
+    } else {
+        super::LIGHT_SUBTEXT
+    };
 
     let (
         notifications,
@@ -260,8 +264,16 @@ pub fn render(router: &Router, cx: &mut Context<Router>) -> impl IntoElement {
         .py_6()
         // ── Pull-to-refresh indicator ──────────────────────────────────
         .when(pull_distance > 10.0 || refreshing, |d| {
-            let indicator_opacity = if refreshing { 1.0 } else { (pull_distance / 80.0).min(1.0) };
-            let indicator_scale = if refreshing { 1.0 } else { (pull_distance / 80.0).min(1.0) };
+            let indicator_opacity = if refreshing {
+                1.0
+            } else {
+                (pull_distance / 80.0).min(1.0)
+            };
+            let indicator_scale = if refreshing {
+                1.0
+            } else {
+                (pull_distance / 80.0).min(1.0)
+            };
             d.child(
                 div()
                     .flex()
@@ -290,300 +302,286 @@ pub fn render(router: &Router, cx: &mut Context<Router>) -> impl IntoElement {
         // ── Section: Personal Info ───────────────────────────────────────
         .child(section_header("Personal Information", sub_text))
         .child(
-            Card::outlined(theme)
-                .full_width()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .p_4()
-                        .child(
-                            TextInput::<Router>::new("input-name", theme)
-                                .label("Full Name")
-                                .value(&full_name_text)
-                                .cursor(full_name_cursor)
-                                .selection(full_name_selection)
-                                .placeholder("Enter your name")
-                                .keyboard_type(KeyboardType::Default)
-                                .focused(focused_field == Some(0))
-                                .on_tap_notify(|event: &MouseDownEvent| {
-                                    log::info!("Form: name field tapped");
-                                    TAPPED_FIELD.with(|f| *f.borrow_mut() = Some(0));
-                                    TAPPED_X.with(|x| *x.borrow_mut() = Some(event.position.x.as_f32()));
-                                    install_keyboard_callback();
-                                    gpui_mobile::show_keyboard_with_type(KeyboardType::Default);
-                                })
-                                .render(cx),
-                        )
-                        .child(
-                            TextInput::<Router>::new("input-email", theme)
-                                .label("Email")
-                                .value(&email_text)
-                                .cursor(email_cursor)
-                                .selection(email_selection)
-                                .placeholder("user@example.com")
-                                .keyboard_type(KeyboardType::EmailAddress)
-                                .focused(focused_field == Some(1))
-                                .on_tap_notify(|event: &MouseDownEvent| {
-                                    log::info!("Form: email field tapped");
-                                    TAPPED_FIELD.with(|f| *f.borrow_mut() = Some(1));
-                                    TAPPED_X.with(|x| *x.borrow_mut() = Some(event.position.x.as_f32()));
-                                    install_keyboard_callback();
-                                    gpui_mobile::show_keyboard_with_type(KeyboardType::EmailAddress);
-                                })
-                                .render(cx),
-                        )
-                        .child(
-                            TextInput::<Router>::new("input-phone", theme)
-                                .label("Phone")
-                                .value(&phone_text)
-                                .cursor(phone_cursor)
-                                .selection(phone_selection)
-                                .placeholder("+1 (555) 000-0000")
-                                .keyboard_type(KeyboardType::Phone)
-                                .focused(focused_field == Some(2))
-                                .on_tap_notify(|event: &MouseDownEvent| {
-                                    log::info!("Form: phone field tapped");
-                                    TAPPED_FIELD.with(|f| *f.borrow_mut() = Some(2));
-                                    TAPPED_X.with(|x| *x.borrow_mut() = Some(event.position.x.as_f32()));
-                                    install_keyboard_callback();
-                                    gpui_mobile::show_keyboard_with_type(KeyboardType::Phone);
-                                })
-                                .render(cx),
-                        ),
-                ),
+            Card::outlined(theme).full_width().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_4()
+                    .child(
+                        TextInput::<Router>::new("input-name", theme)
+                            .label("Full Name")
+                            .value(&full_name_text)
+                            .cursor(full_name_cursor)
+                            .selection(full_name_selection)
+                            .placeholder("Enter your name")
+                            .keyboard_type(KeyboardType::Default)
+                            .focused(focused_field == Some(0))
+                            .on_tap_notify(|event: &MouseDownEvent| {
+                                log::info!("Form: name field tapped");
+                                TAPPED_FIELD.with(|f| *f.borrow_mut() = Some(0));
+                                TAPPED_X
+                                    .with(|x| *x.borrow_mut() = Some(event.position.x.as_f32()));
+                                install_keyboard_callback();
+                                gpui_mobile::show_keyboard_with_type(KeyboardType::Default);
+                            })
+                            .render(cx),
+                    )
+                    .child(
+                        TextInput::<Router>::new("input-email", theme)
+                            .label("Email")
+                            .value(&email_text)
+                            .cursor(email_cursor)
+                            .selection(email_selection)
+                            .placeholder("user@example.com")
+                            .keyboard_type(KeyboardType::EmailAddress)
+                            .focused(focused_field == Some(1))
+                            .on_tap_notify(|event: &MouseDownEvent| {
+                                log::info!("Form: email field tapped");
+                                TAPPED_FIELD.with(|f| *f.borrow_mut() = Some(1));
+                                TAPPED_X
+                                    .with(|x| *x.borrow_mut() = Some(event.position.x.as_f32()));
+                                install_keyboard_callback();
+                                gpui_mobile::show_keyboard_with_type(KeyboardType::EmailAddress);
+                            })
+                            .render(cx),
+                    )
+                    .child(
+                        TextInput::<Router>::new("input-phone", theme)
+                            .label("Phone")
+                            .value(&phone_text)
+                            .cursor(phone_cursor)
+                            .selection(phone_selection)
+                            .placeholder("+1 (555) 000-0000")
+                            .keyboard_type(KeyboardType::Phone)
+                            .focused(focused_field == Some(2))
+                            .on_tap_notify(|event: &MouseDownEvent| {
+                                log::info!("Form: phone field tapped");
+                                TAPPED_FIELD.with(|f| *f.borrow_mut() = Some(2));
+                                TAPPED_X
+                                    .with(|x| *x.borrow_mut() = Some(event.position.x.as_f32()));
+                                install_keyboard_callback();
+                                gpui_mobile::show_keyboard_with_type(KeyboardType::Phone);
+                            })
+                            .render(cx),
+                    ),
+            ),
         )
         // ── Section: Preferences ─────────────────────────────────────────
         .child(section_header("Preferences", sub_text))
         .child(
-            Card::outlined(theme)
-                .full_width()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            Switch::new(theme)
-                                .on(notifications)
-                                .label("Enable notifications")
-                                .on_toggle(cx.listener(|_this, _, _, cx| {
-                                    FORM_STATE.with(|s| {
-                                        let mut state = s.borrow_mut();
-                                        state.form.notifications = !state.form.notifications;
-                                    });
-                                    cx.notify();
-                                }))
-                                .id("notif-switch"),
-                        )
-                        .child(div().h(px(1.0)).mx_4().bg(rgb(theme.outline_variant)))
-                        .child(
-                            Switch::new(theme)
-                                .on(router.dark_mode)
-                                .label("Dark mode")
-                                .on_toggle(cx.listener(|this, _, _, cx| {
-                                    this.dark_mode = !this.dark_mode;
-                                    cx.notify();
-                                }))
-                                .id("dark-switch"),
-                        )
-                        .child(div().h(px(1.0)).mx_4().bg(rgb(theme.outline_variant)))
-                        .child(
-                            Switch::new(theme)
-                                .on(auto_update)
-                                .label("Auto-update")
-                                .with_icons()
-                                .on_toggle(cx.listener(|_this, _, _, cx| {
-                                    FORM_STATE.with(|s| {
-                                        let mut state = s.borrow_mut();
-                                        state.form.auto_update = !state.form.auto_update;
-                                    });
-                                    cx.notify();
-                                }))
-                                .id("update-switch"),
-                        ),
-                ),
+            Card::outlined(theme).full_width().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .child(
+                        Switch::new(theme)
+                            .on(notifications)
+                            .label("Enable notifications")
+                            .on_toggle(cx.listener(|_this, _, _, cx| {
+                                FORM_STATE.with(|s| {
+                                    let mut state = s.borrow_mut();
+                                    state.form.notifications = !state.form.notifications;
+                                });
+                                cx.notify();
+                            }))
+                            .id("notif-switch"),
+                    )
+                    .child(div().h(px(1.0)).mx_4().bg(rgb(theme.outline_variant)))
+                    .child(
+                        Switch::new(theme)
+                            .on(router.dark_mode)
+                            .label("Dark mode")
+                            .on_toggle(cx.listener(|this, _, _, cx| {
+                                this.dark_mode = !this.dark_mode;
+                                cx.notify();
+                            }))
+                            .id("dark-switch"),
+                    )
+                    .child(div().h(px(1.0)).mx_4().bg(rgb(theme.outline_variant)))
+                    .child(
+                        Switch::new(theme)
+                            .on(auto_update)
+                            .label("Auto-update")
+                            .with_icons()
+                            .on_toggle(cx.listener(|_this, _, _, cx| {
+                                FORM_STATE.with(|s| {
+                                    let mut state = s.borrow_mut();
+                                    state.form.auto_update = !state.form.auto_update;
+                                });
+                                cx.notify();
+                            }))
+                            .id("update-switch"),
+                    ),
+            ),
         )
         // ── Section: Account Type ────────────────────────────────────────
         .child(section_header("Account Type", sub_text))
         .child(
-            Card::outlined(theme)
-                .full_width()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            RadioGroup::new(theme)
-                                .option(
-                                    "Personal",
-                                    account_type == 0,
-                                    cx.listener(|_this, _, _, cx| {
-                                        FORM_STATE.with(|s| {
-                                            s.borrow_mut().form.account_type = 0;
-                                        });
-                                        cx.notify();
-                                    }),
-                                )
-                                .option(
-                                    "Business",
-                                    account_type == 1,
-                                    cx.listener(|_this, _, _, cx| {
-                                        FORM_STATE.with(|s| {
-                                            s.borrow_mut().form.account_type = 1;
-                                        });
-                                        cx.notify();
-                                    }),
-                                )
-                                .option(
-                                    "Education",
-                                    account_type == 2,
-                                    cx.listener(|_this, _, _, cx| {
-                                        FORM_STATE.with(|s| {
-                                            s.borrow_mut().form.account_type = 2;
-                                        });
-                                        cx.notify();
-                                    }),
-                                ),
+            Card::outlined(theme).full_width().child(
+                div().flex().flex_col().gap_3().p_4().child(
+                    RadioGroup::new(theme)
+                        .option(
+                            "Personal",
+                            account_type == 0,
+                            cx.listener(|_this, _, _, cx| {
+                                FORM_STATE.with(|s| {
+                                    s.borrow_mut().form.account_type = 0;
+                                });
+                                cx.notify();
+                            }),
+                        )
+                        .option(
+                            "Business",
+                            account_type == 1,
+                            cx.listener(|_this, _, _, cx| {
+                                FORM_STATE.with(|s| {
+                                    s.borrow_mut().form.account_type = 1;
+                                });
+                                cx.notify();
+                            }),
+                        )
+                        .option(
+                            "Education",
+                            account_type == 2,
+                            cx.listener(|_this, _, _, cx| {
+                                FORM_STATE.with(|s| {
+                                    s.borrow_mut().form.account_type = 2;
+                                });
+                                cx.notify();
+                            }),
                         ),
                 ),
+            ),
         )
         // ── Section: Interests ───────────────────────────────────────────
         .child(section_header("Interests", sub_text))
         .child(
-            Card::outlined(theme)
-                .full_width()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            Checkbox::new(theme)
-                                .checked(interests[0])
-                                .label("Technology")
-                                .on_toggle(cx.listener(|_this, _, _, cx| {
-                                    FORM_STATE.with(|s| {
-                                        let mut state = s.borrow_mut();
-                                        state.form.interests[0] = !state.form.interests[0];
-                                    });
-                                    cx.notify();
-                                }))
-                                .id("cb-tech"),
-                        )
-                        .child(
-                            Checkbox::new(theme)
-                                .checked(interests[1])
-                                .label("Design")
-                                .on_toggle(cx.listener(|_this, _, _, cx| {
-                                    FORM_STATE.with(|s| {
-                                        let mut state = s.borrow_mut();
-                                        state.form.interests[1] = !state.form.interests[1];
-                                    });
-                                    cx.notify();
-                                }))
-                                .id("cb-design"),
-                        )
-                        .child(
-                            Checkbox::new(theme)
-                                .checked(interests[2])
-                                .label("Science")
-                                .on_toggle(cx.listener(|_this, _, _, cx| {
-                                    FORM_STATE.with(|s| {
-                                        let mut state = s.borrow_mut();
-                                        state.form.interests[2] = !state.form.interests[2];
-                                    });
-                                    cx.notify();
-                                }))
-                                .id("cb-science"),
-                        )
-                        .child(
-                            Checkbox::new(theme)
-                                .checked(interests[3])
-                                .label("Music")
-                                .on_toggle(cx.listener(|_this, _, _, cx| {
-                                    FORM_STATE.with(|s| {
-                                        let mut state = s.borrow_mut();
-                                        state.form.interests[3] = !state.form.interests[3];
-                                    });
-                                    cx.notify();
-                                }))
-                                .id("cb-music"),
-                        ),
-                ),
+            Card::outlined(theme).full_width().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .child(
+                        Checkbox::new(theme)
+                            .checked(interests[0])
+                            .label("Technology")
+                            .on_toggle(cx.listener(|_this, _, _, cx| {
+                                FORM_STATE.with(|s| {
+                                    let mut state = s.borrow_mut();
+                                    state.form.interests[0] = !state.form.interests[0];
+                                });
+                                cx.notify();
+                            }))
+                            .id("cb-tech"),
+                    )
+                    .child(
+                        Checkbox::new(theme)
+                            .checked(interests[1])
+                            .label("Design")
+                            .on_toggle(cx.listener(|_this, _, _, cx| {
+                                FORM_STATE.with(|s| {
+                                    let mut state = s.borrow_mut();
+                                    state.form.interests[1] = !state.form.interests[1];
+                                });
+                                cx.notify();
+                            }))
+                            .id("cb-design"),
+                    )
+                    .child(
+                        Checkbox::new(theme)
+                            .checked(interests[2])
+                            .label("Science")
+                            .on_toggle(cx.listener(|_this, _, _, cx| {
+                                FORM_STATE.with(|s| {
+                                    let mut state = s.borrow_mut();
+                                    state.form.interests[2] = !state.form.interests[2];
+                                });
+                                cx.notify();
+                            }))
+                            .id("cb-science"),
+                    )
+                    .child(
+                        Checkbox::new(theme)
+                            .checked(interests[3])
+                            .label("Music")
+                            .on_toggle(cx.listener(|_this, _, _, cx| {
+                                FORM_STATE.with(|s| {
+                                    let mut state = s.borrow_mut();
+                                    state.form.interests[3] = !state.form.interests[3];
+                                });
+                                cx.notify();
+                            }))
+                            .id("cb-music"),
+                    ),
+            ),
         )
         // ── Section: Experience Level ────────────────────────────────────
         .child(section_header("Experience Level", sub_text))
         .child(
-            Card::outlined(theme)
-                .full_width()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            Slider::new(theme)
-                                .value(skill_level)
-                                .label("Skill level")
-                                .show_value_label(true)
-                                .range_labels("Beginner", "Expert")
-                                .id("skill-slider"),
-                        )
-                        .child(
-                            Slider::new(theme)
-                                .value(experience)
-                                .label("Years of experience")
-                                .steps(10)
-                                .show_value_label(true)
-                                .range_labels("0", "10+")
-                                .id("exp-slider"),
-                        ),
-                ),
+            Card::outlined(theme).full_width().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .child(
+                        Slider::new(theme)
+                            .value(skill_level)
+                            .label("Skill level")
+                            .show_value_label(true)
+                            .range_labels("Beginner", "Expert")
+                            .id("skill-slider"),
+                    )
+                    .child(
+                        Slider::new(theme)
+                            .value(experience)
+                            .label("Years of experience")
+                            .steps(10)
+                            .show_value_label(true)
+                            .range_labels("0", "10+")
+                            .id("exp-slider"),
+                    ),
+            ),
         )
         // ── Section: Terms ───────────────────────────────────────────────
         .child(
-            Card::outlined(theme)
-                .full_width()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            Checkbox::new(theme)
-                                .checked(terms_accepted)
-                                .label("I agree to the Terms of Service")
-                                .on_toggle(cx.listener(|_this, _, _, cx| {
-                                    FORM_STATE.with(|s| {
-                                        let mut state = s.borrow_mut();
-                                        state.form.terms_accepted = !state.form.terms_accepted;
-                                    });
-                                    cx.notify();
-                                }))
-                                .id("cb-terms"),
-                        )
-                        .child(
-                            Checkbox::new(theme)
-                                .checked(newsletter)
-                                .label("Subscribe to newsletter")
-                                .on_toggle(cx.listener(|_this, _, _, cx| {
-                                    FORM_STATE.with(|s| {
-                                        let mut state = s.borrow_mut();
-                                        state.form.newsletter = !state.form.newsletter;
-                                    });
-                                    cx.notify();
-                                }))
-                                .id("cb-newsletter"),
-                        ),
-                ),
+            Card::outlined(theme).full_width().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .child(
+                        Checkbox::new(theme)
+                            .checked(terms_accepted)
+                            .label("I agree to the Terms of Service")
+                            .on_toggle(cx.listener(|_this, _, _, cx| {
+                                FORM_STATE.with(|s| {
+                                    let mut state = s.borrow_mut();
+                                    state.form.terms_accepted = !state.form.terms_accepted;
+                                });
+                                cx.notify();
+                            }))
+                            .id("cb-terms"),
+                    )
+                    .child(
+                        Checkbox::new(theme)
+                            .checked(newsletter)
+                            .label("Subscribe to newsletter")
+                            .on_toggle(cx.listener(|_this, _, _, cx| {
+                                FORM_STATE.with(|s| {
+                                    let mut state = s.borrow_mut();
+                                    state.form.newsletter = !state.form.newsletter;
+                                });
+                                cx.notify();
+                            }))
+                            .id("cb-newsletter"),
+                    ),
+            ),
         )
         // ── Action buttons ───────────────────────────────────────────────
         .child(
@@ -599,85 +597,76 @@ pub fn render(router: &Router, cx: &mut Context<Router>) -> impl IntoElement {
         // ── Disabled state examples ──────────────────────────────────────
         .child(section_header("Disabled States", sub_text))
         .child(
-            Card::outlined(theme)
-                .full_width()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            Checkbox::new(theme)
-                                .checked(true)
-                                .label("Disabled checked")
-                                .disabled(true)
-                                .id("cb-disabled"),
-                        )
-                        .child(
-                            Switch::new(theme)
-                                .on(true)
-                                .label("Disabled switch")
-                                .disabled(true)
-                                .id("sw-disabled"),
-                        )
-                        .child(
-                            Radio::new(theme)
-                                .selected(true)
-                                .label("Disabled radio")
-                                .disabled(true)
-                                .id("radio-disabled"),
-                        )
-                        .child(
-                            Slider::new(theme)
-                                .value(0.5)
-                                .label("Disabled slider")
-                                .disabled(true)
-                                .id("slider-disabled"),
-                        ),
-                ),
+            Card::outlined(theme).full_width().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .child(
+                        Checkbox::new(theme)
+                            .checked(true)
+                            .label("Disabled checked")
+                            .disabled(true)
+                            .id("cb-disabled"),
+                    )
+                    .child(
+                        Switch::new(theme)
+                            .on(true)
+                            .label("Disabled switch")
+                            .disabled(true)
+                            .id("sw-disabled"),
+                    )
+                    .child(
+                        Radio::new(theme)
+                            .selected(true)
+                            .label("Disabled radio")
+                            .disabled(true)
+                            .id("radio-disabled"),
+                    )
+                    .child(
+                        Slider::new(theme)
+                            .value(0.5)
+                            .label("Disabled slider")
+                            .disabled(true)
+                            .id("slider-disabled"),
+                    ),
+            ),
         )
         // ── Validation states ────────────────────────────────────────────
         .child(section_header("Validation States", sub_text))
         .child(
-            Card::outlined(theme)
-                .full_width()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .p_4()
-                        .child(
-                            TextInput::<Router>::new("input-username-err", theme)
-                                .label("Username")
-                                .value("ab")
-                                .error(true)
-                                .error_text("Username must be at least 3 characters")
-                                .render(cx),
-                        )
-                        .child(
-                            Checkbox::new(theme)
-                                .checked(false)
-                                .label("Accept terms (required)")
-                                .error(true)
-                                .id("cb-error"),
-                        ),
-                ),
+            Card::outlined(theme).full_width().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .child(
+                        TextInput::<Router>::new("input-username-err", theme)
+                            .label("Username")
+                            .value("ab")
+                            .error(true)
+                            .error_text("Username must be at least 3 characters")
+                            .render(cx),
+                    )
+                    .child(
+                        Checkbox::new(theme)
+                            .checked(false)
+                            .label("Accept terms (required)")
+                            .error(true)
+                            .id("cb-error"),
+                    ),
+            ),
         )
         // ── Footer ───────────────────────────────────────────────────────
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .py_6()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(sub_text))
-                        .child("Form built with Material Design 3 components"),
-                ),
+            div().flex().flex_col().items_center().py_6().child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(sub_text))
+                    .child("Form built with Material Design 3 components"),
+            ),
         )
 }
 
