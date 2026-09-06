@@ -2298,8 +2298,8 @@ mod tests {
     }
 
     #[test]
-    fn gpu_info_none_for_headless() {
+    fn gpu_specs_none_for_headless() {
         let w = AndroidWindow::headless(1080, 1920, 2.0);
-        assert!(w.gpu_info().is_none());
+        assert!(w.gpu_specs().is_none());
     }
 }

@@ -19,8 +19,8 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath("com.android.tools.build:gradle:9.1.0")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22")
+        classpath("com.android.tools.build:gradle:9.4.0")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.10")
     }
 }
 
@@ -33,24 +33,24 @@ tasks.register("clean", Delete::class) {
 tasks.register<Exec>("buildRustRelease") {
     group = "rust"
     description = "Compile the Rust native library for arm64-v8a using cargo-ndk."
-    workingDir = rootProject.projectDir.parentFile.parentFile.parentFile // -> gpui/
+    workingDir = rootProject.projectDir.parentFile.parentFile // example crate
     commandLine(
         "cargo", "ndk",
         "-t", "arm64-v8a",
-        "-o", "example/android_app/gradle/app/src/main/jniLibs",
-        "build", "--example", "android_app", "--release"
+        "-o", "android/gradle/app/src/main/jniLibs",
+        "build", "--lib", "--release"
     )
 }
 
 tasks.register<Exec>("buildRustDebug") {
     group = "rust"
     description = "Compile the Rust native library for arm64-v8a (debug) using cargo-ndk."
-    workingDir = rootProject.projectDir.parentFile.parentFile.parentFile
+    workingDir = rootProject.projectDir.parentFile.parentFile
     commandLine(
         "cargo", "ndk",
         "-t", "arm64-v8a",
-        "-o", "example/android_app/gradle/app/src/main/jniLibs",
-        "build", "--example", "android_app"
+        "-o", "android/gradle/app/src/main/jniLibs",
+        "build", "--lib"
     )
 }
 
