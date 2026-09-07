@@ -297,35 +297,29 @@ impl IosPlatformView {
         }
 
         unsafe {
-            if let Some(wrapper) = super::ffi::IOS_WINDOW_LIST.get() {
-                let windows = &*wrapper.0.get();
-                if let Some(&window_ptr) = windows.last() {
-                    if !window_ptr.is_null() {
-                        let window = &*window_ptr;
-                        // Get the view controller's view (parent of Metal view)
-                        let vc: *mut AnyObject = window.view_controller_ptr();
-                        let vc_view: *mut AnyObject = msg_send![vc, view];
-                        if !vc_view.is_null() {
-                            // Get the Metal view
-                            let metal_view = window.metal_view_ptr();
-                            if !metal_view.is_null() {
-                                // Insert below the Metal view so GPUI renders on top
-                                let _: () = msg_send![
-                                    vc_view,
-                                    insertSubview: native_view,
-                                    belowSubview: metal_view
-                                ];
-                            } else {
-                                // Fallback: just add as subview
-                                let _: () = msg_send![vc_view, addSubview: native_view];
-                            }
-                            log::info!(
-                                "IosPlatformView: inserted view {} into window hierarchy",
-                                self.id
-                            );
-                            return Ok(());
-                        }
+            if let Some(window) = super::ffi::window_for_handle(super::ffi::gpui_ios_get_window()) {
+                // Get the view controller's view (parent of Metal view)
+                let vc: *mut AnyObject = window.view_controller_ptr();
+                let vc_view: *mut AnyObject = msg_send![vc, view];
+                if !vc_view.is_null() {
+                    // Get the Metal view
+                    let metal_view = window.metal_view_ptr();
+                    if !metal_view.is_null() {
+                        // Insert below the Metal view so GPUI renders on top
+                        let _: () = msg_send![
+                            vc_view,
+                            insertSubview: native_view,
+                            belowSubview: metal_view
+                        ];
+                    } else {
+                        // Fallback: just add as subview
+                        let _: () = msg_send![vc_view, addSubview: native_view];
                     }
+                    log::info!(
+                        "IosPlatformView: inserted view {} into window hierarchy",
+                        self.id
+                    );
+                    return Ok(());
                 }
             }
         }

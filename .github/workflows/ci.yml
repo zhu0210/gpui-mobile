@@ -45,7 +45,7 @@ jobs:
         run: cargo check --all-targets
 
       - name: cargo test (unit tests)
-        run: cargo test --lib
+        run: cargo test --tests
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -57,16 +57,18 @@ jobs:
   # iOS cross-compilation
   # ─────────────────────────────────────────────────────────────────────────────
   ios:
-    name: iOS Build (${{ matrix.target }})
-    runs-on: macos-14
+    name: iOS Application (${{ matrix.label }})
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-ios
             label: device
+            destination: generic/platform=iOS
           - target: aarch64-apple-ios-sim
             label: simulator
+            destination: generic/platform=iOS Simulator
     steps:
       - uses: actions/checkout@v6
 
@@ -82,15 +84,32 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ios-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+            example/target
+          key: ios-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'example/Cargo.lock', 'example/Cargo.toml') }}
           restore-keys: ios-${{ matrix.target }}-cargo-
 
       - name: cargo check — gpui-mobile (${{ matrix.label }})
         run: cargo check --target ${{ matrix.target }}
 
-      - name: cargo check — example app (${{ matrix.label }})
-        working-directory: example
-        run: cargo check --target ${{ matrix.target }}
+      - name: Generate iOS application
+        run: |
+          brew install xcodegen
+          xcodegen generate --spec example/ios/project.yml
+
+      - name: Build and link iOS application (${{ matrix.label }})
+        run: |
+          xcodebuild -project example/ios/GpuiExample.xcodeproj \
+            -scheme GpuiExample -configuration Debug \
+            -destination '${{ matrix.destination }}' \
+            -derivedDataPath "$RUNNER_TEMP/gpui-example-${{ matrix.label }}" \
+            CODE_SIGNING_ALLOWED=NO build
+
+      - name: Upload iOS application (${{ matrix.label }})
+        uses: actions/upload-artifact@v7
+        with:
+          name: gpui-example-ios-${{ matrix.label }}
+          path: ${{ runner.temp }}/gpui-example-${{ matrix.label }}/Build/Products/Debug-*/GpuiExample.app
+          if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Android cross-compilation

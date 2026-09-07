@@ -106,16 +106,11 @@ fn register_view_controller_class() -> &'static AnyClass {
                 let _: () = msg_send![super(this, superclass), viewDidLayoutSubviews];
             }
 
-            // Notify all registered GPUI windows about the layout change.
-            if let Some(wrapper) = super::ffi::IOS_WINDOW_LIST.get() {
-                unsafe {
-                    let windows = &*wrapper.0.get();
-                    for &window_ptr in windows.iter() {
-                        if !window_ptr.is_null() {
-                            let window = &*window_ptr;
-                            window.handle_layout_change();
-                        }
-                    }
+            // Snapshot IDs, then retain each window only while calling it. A
+            // callback may close a later window or create another one.
+            for id in super::ffi::window_ids() {
+                if let Some(window) = super::ffi::window_for_handle(id as *mut c_void) {
+                    window.handle_layout_change();
                 }
             }
         }
@@ -152,16 +147,10 @@ pub fn set_status_bar_style(style: crate::StatusBarContentStyle) {
 
     // Ask UIKit to re-query the status bar style
     unsafe {
-        if let Some(wrapper) = super::ffi::IOS_WINDOW_LIST.get() {
-            let windows = &*wrapper.0.get();
-            if let Some(&window_ptr) = windows.last() {
-                if !window_ptr.is_null() {
-                    let window = &*window_ptr;
-                    let vc = window.view_controller;
-                    if !vc.is_null() {
-                        let _: () = msg_send![vc, setNeedsStatusBarAppearanceUpdate];
-                    }
-                }
+        if let Some(window) = super::ffi::window_for_handle(super::ffi::gpui_ios_get_window()) {
+            let vc = window.view_controller;
+            if !vc.is_null() {
+                let _: () = msg_send![vc, setNeedsStatusBarAppearanceUpdate];
             }
         }
     }
@@ -297,7 +286,9 @@ fn register_text_input_view_class() -> &'static AnyClass {
             if window_ptr.is_null() || text.is_null() {
                 return;
             }
-            let window = &*(window_ptr as *const IosWindow);
+            let Some(window) = super::ffi::window_for_handle(window_ptr) else {
+                return;
+            };
             window.handle_text_input(text);
         }
 
@@ -308,7 +299,9 @@ fn register_text_input_view_class() -> &'static AnyClass {
             if window_ptr.is_null() {
                 return;
             }
-            let window = &*(window_ptr as *const IosWindow);
+            let Some(window) = super::ffi::window_for_handle(window_ptr) else {
+                return;
+            };
             window.handle_delete_backward();
         }
 
@@ -401,7 +394,7 @@ fn register_text_input_view_class() -> &'static AnyClass {
 /// Handle touch events from the GPUIMetalView
 fn handle_touches(view: *mut AnyObject, touches: *mut AnyObject, event: *mut AnyObject) {
     unsafe {
-        // Get the window pointer from the view's ivar
+        // Get the opaque window handle from the view's ivar
         #[allow(deprecated)]
         let window_ptr: *mut std::ffi::c_void = *(*view).get_ivar(GPUI_WINDOW_IVAR);
         if window_ptr.is_null() {
@@ -409,7 +402,9 @@ fn handle_touches(view: *mut AnyObject, touches: *mut AnyObject, event: *mut Any
             return;
         }
 
-        let window = &*(window_ptr as *const IosWindow);
+        let Some(window) = super::ffi::window_for_handle(window_ptr) else {
+            return;
+        };
 
         // Get all touches from the set
         let all_touches: *mut AnyObject = msg_send![touches, allObjects];
@@ -451,6 +446,8 @@ pub(crate) struct IosWindow {
     view: *mut AnyObject,
     /// The hidden text input view for keyboard input
     text_input_view: *mut AnyObject,
+    ffi_handle: Cell<usize>,
+    keyboard_observers: RefCell<Vec<*mut AnyObject>>,
     /// Current bounds in pixels
     bounds: Cell<Bounds<Pixels>>,
     /// Scale factor
@@ -499,12 +496,73 @@ pub(crate) struct IosWindow {
     renderer: Mutex<Option<WgpuRenderer>>,
 }
 
-// Required for raw_window_handle
-unsafe impl Send for IosWindow {}
-unsafe impl Sync for IosWindow {}
+/// GPUI owns this handle; native callbacks temporarily retain its window.
+pub(crate) struct IosWindowHandle(pub(crate) Rc<IosWindow>);
+impl std::ops::Deref for IosWindowHandle {
+    type Target = IosWindow;
+    fn deref(&self) -> &IosWindow {
+        &self.0
+    }
+}
+impl Drop for IosWindowHandle {
+    fn drop(&mut self) {
+        super::ffi::unregister_window(self.ffi_handle.get());
+    }
+}
+impl HasWindowHandle for IosWindowHandle {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        self.0.window_handle()
+    }
+}
+impl HasDisplayHandle for IosWindowHandle {
+    fn display_handle(
+        &self,
+    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        self.0.display_handle()
+    }
+}
+
+impl Drop for IosWindow {
+    fn drop(&mut self) {
+        // SAFETY: windows and callback guards are created/dropped on UIKit's
+        // main thread. Clear native routing before any UIKit teardown can reenter.
+        unsafe {
+            #[allow(deprecated)]
+            for view in [self.view, self.text_input_view] {
+                *(*view).get_mut_ivar::<*mut c_void>(GPUI_WINDOW_IVAR) = ptr::null_mut();
+            }
+            let center: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
+            for observer in self.keyboard_observers.get_mut().drain(..) {
+                let _: () = msg_send![center, removeObserver: observer];
+                let _: () = msg_send![observer, release];
+            }
+            // The GPU surface references the Metal view, so release it first.
+            self.renderer.get_mut().take();
+            let _: () = msg_send![self.text_input_view, resignFirstResponder];
+            let _: () = msg_send![self.window, setHidden: true];
+            let _: () = msg_send![self.window, setRootViewController: ptr::null::<AnyObject>()];
+            // Balance each alloc/init owned by new(); UIKit releases its own
+            // child references as the window/controller hierarchy is destroyed.
+            for object in [
+                self.window,
+                self.view_controller,
+                self.view,
+                self.text_input_view,
+            ] {
+                let _: () = msg_send![object, release];
+            }
+        }
+    }
+}
 
 impl IosWindow {
     pub fn new(handle: AnyWindowHandle, _params: WindowParams) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            objc2::MainThreadMarker::new().is_some(),
+            "iOS windows require the main thread"
+        );
         // Create the window on the main screen
         let screen = IosDisplay::main();
         let screen_bounds = screen.bounds();
@@ -573,6 +631,8 @@ impl IosWindow {
                 view_controller,
                 view,
                 text_input_view,
+                ffi_handle: Cell::new(0),
+                keyboard_observers: RefCell::new(Vec::new()),
                 bounds: Cell::new(screen_bounds),
                 scale_factor: Cell::new(scale_factor),
                 input_handler: RefCell::new(None),
@@ -670,16 +730,15 @@ impl IosWindow {
         self.view
     }
 
-    /// Register this window with the FFI layer after it's been stored.
-    /// This must be called after the window is placed at a stable address
-    /// (e.g., in a Box or Arc).
-    pub(crate) fn register_with_ffi(&self) {
-        super::ffi::register_window(self as *const Self);
+    /// Register the window weakly; UIKit stores an opaque ID, never its address.
+    pub(crate) fn register_with_ffi(self: &Rc<Self>) -> anyhow::Result<()> {
+        let handle = super::ffi::register_window(self)?;
+        self.ffi_handle.set(handle);
 
-        // Set the window pointer on the view so touch events can find us,
+        // Set the opaque handle on the view so touch events can find us,
         // and on the text input view so keyboard input can find us.
         unsafe {
-            let window_ptr = self as *const Self as *mut std::ffi::c_void;
+            let window_ptr = handle as *mut std::ffi::c_void;
             #[allow(deprecated)]
             {
                 *(*self.view).get_mut_ivar::<*mut c_void>(GPUI_WINDOW_IVAR) = window_ptr;
@@ -698,6 +757,7 @@ impl IosWindow {
 
         // Listen for keyboard show/hide so we can expose the keyboard height.
         self.register_keyboard_observers();
+        Ok(())
     }
 
     /// Register for keyboard show/hide notifications so we can track the
@@ -738,23 +798,26 @@ impl IosWindow {
                 crate::set_keyboard_height(0.0);
             });
 
-            let _: *mut AnyObject = msg_send![notification_center,
+            let observer: *mut AnyObject = msg_send![notification_center,
                 addObserverForName: show_name,
                 object: std::ptr::null::<AnyObject>(),
                 queue: std::ptr::null::<AnyObject>(),
                 usingBlock: &*show_block
             ];
-            let _: *mut AnyObject = msg_send![notification_center,
+            let _: *mut AnyObject = msg_send![observer, retain];
+            self.keyboard_observers.borrow_mut().push(observer);
+            let observer: *mut AnyObject = msg_send![notification_center,
                 addObserverForName: hide_name,
                 object: std::ptr::null::<AnyObject>(),
                 queue: std::ptr::null::<AnyObject>(),
                 usingBlock: &*hide_block
             ];
+            let _: *mut AnyObject = msg_send![observer, retain];
+            self.keyboard_observers.borrow_mut().push(observer);
             // show_name and hide_name are autoreleased by util::nsstring
 
-            // Leak the blocks so they live for the app lifetime.
-            std::mem::forget(show_block);
-            std::mem::forget(hide_block);
+            // NotificationCenter copies each block; local RcBlocks can drop.
+            // The retained observer tokens are removed/released with the window.
         }
     }
 
@@ -788,9 +851,9 @@ impl IosWindow {
         let mut ts = self.touch_state.get();
 
         let emit = |input: PlatformInput| {
-            if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
+            super::callback::invoke(&self.input_callback, |callback| {
                 callback(input);
-            }
+            });
         };
 
         match phase {
@@ -1018,8 +1081,9 @@ impl IosWindow {
             let modifiers = self.modifiers.get();
             let position = gpui::point(gpui::px(delta.position_x), gpui::px(delta.position_y));
             let fling_ended = !scroller.is_active();
+            drop(scroller);
 
-            if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
+            super::callback::invoke(&self.input_callback, |callback| {
                 callback(PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
                     position,
                     delta: gpui::ScrollDelta::Pixels(gpui::point(
@@ -1039,7 +1103,7 @@ impl IosWindow {
                         touch_phase: gpui::TouchPhase::Ended,
                     }));
                 }
-            }
+            });
         } else {
             // Fling finished — emit one final Ended event so GPUI knows
             // the scroll gesture is truly complete.
@@ -1048,14 +1112,15 @@ impl IosWindow {
                 gpui::px(scroller.position_y()),
             );
             let modifiers = self.modifiers.get();
-            if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
+            drop(scroller);
+            super::callback::invoke(&self.input_callback, |callback| {
                 callback(PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
                     position,
                     delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(0.0))),
                     modifiers,
                     touch_phase: gpui::TouchPhase::Ended,
                 }));
-            }
+            });
         }
     }
 
@@ -1167,9 +1232,9 @@ impl IosWindow {
                     prefer_character_input: true,
                 });
 
-                if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
+                super::callback::invoke(&self.input_callback, |callback| {
                     callback(event);
-                }
+                });
             }
         }
     }
@@ -1198,9 +1263,9 @@ impl IosWindow {
             is_held: false,
             prefer_character_input: false,
         });
-        if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
+        super::callback::invoke(&self.input_callback, |callback| {
             callback(event);
-        }
+        });
     }
 
     /// Handle a key event from an external keyboard
@@ -1246,9 +1311,9 @@ impl IosWindow {
             key_code_to_key_up(key_code, modifier_flags)
         };
 
-        if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
+        super::callback::invoke(&self.input_callback, |callback| {
             callback(event);
-        }
+        });
     }
 
     /// Notify the window of active status changes (foreground/background).
@@ -1258,9 +1323,9 @@ impl IosWindow {
     pub fn notify_active_status_change(&self, is_active: bool) {
         log::info!("GPUI iOS: Window active status changed to: {}", is_active);
 
-        if let Some(callback) = self.active_status_callback.borrow_mut().as_mut() {
+        super::callback::invoke(&self.active_status_callback, |callback| {
             callback(is_active);
-        }
+        });
     }
 
     /// Handle a layout change (e.g. rotation, split-screen resize).
@@ -1356,7 +1421,7 @@ impl HasDisplayHandle for IosWindow {
     }
 }
 
-impl PlatformWindow for IosWindow {
+impl PlatformWindow for IosWindowHandle {
     fn bounds(&self) -> Bounds<Pixels> {
         self.bounds.get()
     }

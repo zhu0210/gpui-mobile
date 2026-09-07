@@ -524,6 +524,12 @@ impl AndroidWindow {
     /// Drops the renderer (and therefore the wgpu surface) but keeps the window
     /// struct alive so callbacks are preserved.
     pub fn term_window(&self) {
+        self.handle_touch(TouchPoint {
+            id: -1,
+            x: 0.0,
+            y: 0.0,
+            action: 3,
+        });
         let mut state = self.state.lock();
 
         // Unconfigure the surface so the renderer stops trying to present,
@@ -801,6 +807,14 @@ impl AndroidWindow {
     pub fn set_active(&self, active: bool) {
         use std::sync::atomic::Ordering;
         let prev = self.active.swap(active, Ordering::Relaxed);
+        if !active {
+            self.handle_touch(TouchPoint {
+                id: -1,
+                x: 0.0,
+                y: 0.0,
+                action: 3,
+            });
+        }
         if prev != active {
             log::info!(
                 "AndroidWindow::set_active({}) — changed from {}",
@@ -1479,8 +1493,30 @@ impl PlatformWindow for AndroidPlatformWindow {
             }
 
             let state = Mutex::new(TouchState::Idle);
+            let active_pointer = Mutex::new(None);
 
             self.window.on_touch(move |touch| {
+                // GPUI's mouse/scroll bridge represents one gesture. Additional
+                // fingers must not reset it or release the owning finger's tap.
+                {
+                    let mut pointer = active_pointer.lock();
+                    if touch.action == 0 {
+                        if pointer.is_some() {
+                            return;
+                        }
+                        *pointer = Some(touch.id);
+                    } else if touch.action == 3 {
+                        // CANCEL applies to the whole gesture, including surface loss.
+                        if pointer.is_none() {
+                            return;
+                        }
+                    } else if *pointer != Some(touch.id) {
+                        return;
+                    }
+                    if matches!(touch.action, 1 | 3) {
+                        *pointer = None;
+                    }
+                }
                 // Android delivers touch coordinates in physical (device)
                 // pixels, but GPUI performs layout and hit-testing in logical
                 // pixels.  Divide by scale factor.
@@ -1596,8 +1632,37 @@ impl PlatformWindow for AndroidPlatformWindow {
                         }));
                     }
 
-                    // ── ACTION_UP / ACTION_CANCEL ────────────────────────
-                    1 | 3 => {
+                    // Cancellation is never a tap or a fling (e.g. the system
+                    // intercepted a navigation gesture or another view took over).
+                    3 => {
+                        let scrolling = matches!(*ts, TouchState::Scrolling { .. });
+                        *ts = TouchState::Idle;
+                        drop(ts);
+                        {
+                            let mut ms = momentum.lock();
+                            ms.scroller.cancel();
+                            ms.velocity_tracker.reset();
+                            ms.pending_scroll_dx = 0.0;
+                            ms.pending_scroll_dy = 0.0;
+                            ms.has_pending_scroll = false;
+                        }
+                        if scrolling {
+                            let _ = cb.lock()(gpui::PlatformInput::ScrollWheel(
+                                gpui::ScrollWheelEvent {
+                                    position: gpui::point(gpui::px(logical_x), gpui::px(logical_y)),
+                                    delta: gpui::ScrollDelta::Pixels(gpui::point(
+                                        gpui::px(0.0),
+                                        gpui::px(0.0),
+                                    )),
+                                    modifiers,
+                                    touch_phase: gpui::TouchPhase::Ended,
+                                },
+                            ));
+                        }
+                    }
+
+                    // ── ACTION_UP ─────────────────────────────────────────
+                    1 => {
                         let position = gpui::point(gpui::px(logical_x), gpui::px(logical_y));
 
                         match *ts {
@@ -2038,7 +2103,7 @@ impl PlatformAtlas for FallbackAtlas {
         let mut state = self.state.lock();
 
         if let Some(tile) = state.tiles.get(key) {
-            return Ok(Some(tile.clone()));
+            return Ok(Some(*tile));
         }
 
         let data = build()?;
@@ -2059,7 +2124,7 @@ impl PlatformAtlas for FallbackAtlas {
                 },
             };
 
-            state.tiles.insert(key.clone(), tile.clone());
+            state.tiles.insert(key.clone(), tile);
             Ok(Some(tile))
         } else {
             Ok(None)
@@ -2126,6 +2191,95 @@ impl WindowList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_touch_never_clicks_or_starts_momentum() {
+        let window = AndroidWindow::headless(1080, 1920, 1.0);
+        let platform_window = AndroidPlatformWindow::new(window.clone(), None);
+        let clicks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = clicks.clone();
+        platform_window.on_input(Box::new(move |event| {
+            if matches!(
+                event,
+                gpui::PlatformInput::MouseDown(_) | gpui::PlatformInput::MouseUp(_)
+            ) {
+                seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            DispatchEventResult::default()
+        }));
+        for (action, y) in [(0, 0.0), (3, 0.0), (0, 0.0), (2, 100.0), (3, 100.0)] {
+            window.handle_touch(TouchPoint {
+                id: 1,
+                x: 0.0,
+                y,
+                action,
+            });
+        }
+        assert_eq!(clicks.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let momentum = platform_window.momentum.lock();
+        assert!(!momentum.scroller.is_active());
+        assert!(!momentum.has_pending_scroll);
+    }
+
+    #[test]
+    fn secondary_pointer_cannot_release_primary_tap() {
+        let window = AndroidWindow::headless(1080, 1920, 1.0);
+        let platform_window = AndroidPlatformWindow::new(window.clone(), None);
+        let clicks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = clicks.clone();
+        platform_window.on_input(Box::new(move |event| {
+            if matches!(event, gpui::PlatformInput::MouseDown(_)) {
+                seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            DispatchEventResult::default()
+        }));
+        for (id, action) in [(1, 0), (2, 0), (2, 2), (2, 1)] {
+            window.handle_touch(TouchPoint {
+                id,
+                x: 0.0,
+                y: 0.0,
+                action,
+            });
+        }
+        assert_eq!(clicks.load(std::sync::atomic::Ordering::Relaxed), 0);
+        window.handle_touch(TouchPoint {
+            id: 1,
+            x: 0.0,
+            y: 0.0,
+            action: 1,
+        });
+        assert_eq!(clicks.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn surface_loss_cancels_pointer_ownership_before_resume() {
+        let window = AndroidWindow::headless(1080, 1920, 1.0);
+        let platform_window = AndroidPlatformWindow::new(window.clone(), None);
+        let clicks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = clicks.clone();
+        platform_window.on_input(Box::new(move |event| {
+            if matches!(event, gpui::PlatformInput::MouseDown(_)) {
+                seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            DispatchEventResult::default()
+        }));
+        window.handle_touch(TouchPoint {
+            id: 1,
+            x: 0.0,
+            y: 0.0,
+            action: 0,
+        });
+        window.term_window();
+        for action in [0, 1] {
+            window.handle_touch(TouchPoint {
+                id: 2,
+                x: 0.0,
+                y: 0.0,
+                action,
+            });
+        }
+        assert_eq!(clicks.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn headless_window_geometry() {

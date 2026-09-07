@@ -330,6 +330,7 @@ pub fn shared_platform() -> Option<SharedPlatform> {
 const AMOTION_EVENT_ACTION_DOWN: u32 = 0;
 const AMOTION_EVENT_ACTION_UP: u32 = 1;
 const AMOTION_EVENT_ACTION_MOVE: u32 = 2;
+const AMOTION_EVENT_ACTION_CANCEL: u32 = 3;
 
 // ── night mode query via NDK Configuration ───────────────────────────────────
 
@@ -380,6 +381,15 @@ fn process_input_events(app: &AndroidApp) {
                         InputEvent::MotionEvent(motion_event) => {
                             let action = motion_event.action();
                             let pointer_count = motion_event.pointer_count();
+                            if pointer_count == 0 {
+                                if action == MotionAction::Cancel {
+                                    win.handle_touch(crate::android::TouchPoint {
+                                        id: -1, x: 0.0, y: 0.0, action: AMOTION_EVENT_ACTION_CANCEL,
+                                    });
+                                    return android_activity::InputStatus::Handled;
+                                }
+                                return android_activity::InputStatus::Unhandled;
+                            }
 
                             log::debug!(
                                 "process_input_events: MotionEvent action={:?} pointers={}",
@@ -449,7 +459,7 @@ fn process_input_events(app: &AndroidApp) {
                                         AMOTION_EVENT_ACTION_UP
                                     }
                                     MotionAction::Move => AMOTION_EVENT_ACTION_MOVE,
-                                    MotionAction::Cancel => AMOTION_EVENT_ACTION_UP,
+                                    MotionAction::Cancel => AMOTION_EVENT_ACTION_CANCEL,
                                     _ => continue,
                                 };
 
@@ -573,12 +583,15 @@ pub fn run_event_loop(app: &AndroidApp) {
             platform.tick();
         }
 
-        // ── Poll for events (non-blocking) ──
-        //
-        // Non-blocking poll: process any pending events then immediately
-        // continue to rendering. No sleep — the GPU present call
-        // (get_current_texture / Mailbox) provides natural frame pacing.
-        app.poll_events(Some(Duration::ZERO), |event| match event {
+        // Without an active surface there is no presentation to pace this loop.
+        // Wait for lifecycle/input/waker events instead of spinning every 500µs.
+        // The bounded wait also services periodic platform work while suspended.
+        let timeout = if app_is_active && INIT_WINDOW_DONE.load(Ordering::Relaxed) {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(100)
+        };
+        app.poll_events(Some(timeout), |event| match event {
             PollEvent::Main(main_event) => {
                 handle_main_event(app, main_event);
             }
@@ -1338,6 +1351,7 @@ pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiMediaSession_nativeMediaSeek(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
