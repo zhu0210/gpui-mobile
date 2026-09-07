@@ -127,6 +127,9 @@ targets:
           # Build the Rust static library
           cargo build --locked --lib --target "${RUST_TARGET}" ${CARGO_FLAGS} 2>&1
 
+          test -f "${EXAMPLE_STATIC_LIB}"
           echo "Rust build complete for ${RUST_TARGET}"
         shell: /bin/bash
+        outputFiles:
+          - "$(EXAMPLE_STATIC_LIB)"
         basedOnDependencyAnalysis: false
