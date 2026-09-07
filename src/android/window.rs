@@ -55,6 +55,10 @@ use std::sync::{Arc, OnceLock};
 use super::{AndroidKeyEvent, Bounds, DevicePixels, Pixels, Point, Size, TouchPoint};
 use crate::momentum::{MomentumScroller, VelocityTracker};
 
+#[path = "gesture_route.rs"]
+mod gesture_route;
+use gesture_route::GestureRoute;
+
 /// Lightweight, owned window handle for wgpu surface creation.
 /// Stores the raw ANativeWindow pointer and implements the traits
 /// required by `WgpuRenderer::new` (`Clone + Debug + Send + Sync + 'static`).
@@ -340,6 +344,8 @@ pub struct AndroidWindow {
     /// lifecycle handlers can set it without acquiring the state lock
     /// (which may be held by a background render thread).
     active: Arc<std::sync::atomic::AtomicBool>,
+    /// Owner of the entire native-vs-Java touch stream, independent of its position.
+    gesture_route: Mutex<GestureRoute>,
 }
 
 // SAFETY: `WindowState` is protected by a `Mutex`.
@@ -415,6 +421,7 @@ impl AndroidWindow {
             state,
             id,
             active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            gesture_route: Mutex::new(GestureRoute::default()),
         }))
     }
 
@@ -446,6 +453,7 @@ impl AndroidWindow {
             state,
             id: ((width as u64) << 32) | (height as u64),
             active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            gesture_route: Mutex::new(GestureRoute::default()),
         })
     }
 
@@ -524,6 +532,7 @@ impl AndroidWindow {
     /// Drops the renderer (and therefore the wgpu surface) but keeps the window
     /// struct alive so callbacks are preserved.
     pub fn term_window(&self) {
+        self.gesture_route.lock().reset();
         self.handle_touch(TouchPoint {
             id: -1,
             x: 0.0,
@@ -721,6 +730,30 @@ impl AndroidWindow {
 
     // ── input event delivery ──────────────────────────────────────────────────
 
+    /// Choose once on DOWN, then retain that owner through UP/CANCEL.
+    pub(super) fn route_touch_to_platform_view(
+        &self,
+        action: u32,
+        hit_test: impl FnOnce() -> bool,
+    ) -> bool {
+        let (platform_view, interrupted_gpui) = {
+            let mut route = self.gesture_route.lock();
+            let interrupted_gpui = action == 0 && route.owns_gpui_gesture();
+            (route.route(action, hit_test), interrupted_gpui)
+        };
+        // A fresh DOWN can arrive after a lost terminal event. Release the old
+        // GPUI gesture before dispatching the new stream, without holding a lock.
+        if interrupted_gpui {
+            self.handle_touch(TouchPoint {
+                id: -1,
+                x: 0.0,
+                y: 0.0,
+                action: 3,
+            });
+        }
+        platform_view
+    }
+
     /// Deliver a touch point to the registered touch callback.
     ///
     /// The callback is taken out of the lock before invocation (same pattern
@@ -808,6 +841,7 @@ impl AndroidWindow {
         use std::sync::atomic::Ordering;
         let prev = self.active.swap(active, Ordering::Relaxed);
         if !active {
+            self.gesture_route.lock().reset();
             self.handle_touch(TouchPoint {
                 id: -1,
                 x: 0.0,

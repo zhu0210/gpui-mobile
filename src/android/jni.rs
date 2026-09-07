@@ -381,61 +381,31 @@ fn process_input_events(app: &AndroidApp) {
                         InputEvent::MotionEvent(motion_event) => {
                             let action = motion_event.action();
                             let pointer_count = motion_event.pointer_count();
-                            if pointer_count == 0 {
-                                if action == MotionAction::Cancel {
-                                    win.handle_touch(crate::android::TouchPoint {
-                                        id: -1, x: 0.0, y: 0.0, action: AMOTION_EVENT_ACTION_CANCEL,
-                                    });
-                                    return android_activity::InputStatus::Handled;
-                                }
+                            if pointer_count == 0 && action != MotionAction::Cancel {
                                 return android_activity::InputStatus::Unhandled;
                             }
 
-                            log::debug!(
-                                "process_input_events: MotionEvent action={:?} pointers={}",
-                                action,
-                                pointer_count,
-                            );
-
-                            // Check if this touch lands on a platform view.
-                            //
-                            // On Android with NativeActivity, ALL touch events go
-                            // to the native surface first. Platform views are real
-                            // Java Views in a FrameLayout overlay, but they won't
-                            // receive touches unless we skip GPUI dispatch and let
-                            // Android's view hierarchy handle the event instead.
-                            //
-                            // We use the primary pointer for the hit-test on DOWN
-                            // actions. Physical pixel coordinates are converted to
-                            // logical pixels to match PlatformViewBounds.
-                            let hits_platform_view = {
-                                let registry = crate::platform_view::PlatformViewRegistry::global();
-                                if registry.active_view_count() > 0 {
-                                    let primary = motion_event.pointer_at_index(
-                                        match action {
-                                            MotionAction::PointerDown | MotionAction::PointerUp => {
-                                                motion_event.pointer_index()
-                                            }
-                                            _ => 0,
-                                        }
-                                    );
-                                    let scale = win.scale_factor();
-                                    let logical_x = primary.x() / scale;
-                                    let logical_y = primary.y() / scale;
-                                    registry.hit_test(logical_x, logical_y)
-                                } else {
-                                    false
-                                }
-                            };
-
-                            if hits_platform_view {
-                                log::debug!(
-                                    "process_input_events: touch hits platform view, skipping GPUI dispatch",
-                                );
-                                // Return Unhandled so android-activity can pass
-                                // the event back to the Java view hierarchy where
-                                // the platform view's FrameLayout lives.
+                            let platform_view = win.route_touch_to_platform_view(action.into(), || {
+                                // This closure runs ONLY on primary DOWN. Registry
+                                // movement, pointer movement and secondary fingers
+                                // cannot transfer an in-progress gesture.
+                                let primary = motion_event.pointer_at_index(0);
+                                let scale = win.scale_factor();
+                                crate::platform_view::PlatformViewRegistry::global()
+                                    .hit_test(primary.x() / scale, primary.y() / scale)
+                            });
+                            if platform_view {
+                                // android-activity calls AInputQueue_finishEvent(false).
+                                // ViewRootImpl's NativePostImeInputStage forwards the
+                                // original event to the Java hierarchy, preserving its
+                                // downTime, pointer IDs and ViewGroup touch target.
                                 return android_activity::InputStatus::Unhandled;
+                            }
+                            if pointer_count == 0 {
+                                win.handle_touch(crate::android::TouchPoint {
+                                    id: -1, x: 0.0, y: 0.0, action: AMOTION_EVENT_ACTION_CANCEL,
+                                });
+                                return android_activity::InputStatus::Handled;
                             }
 
                             for i in 0..pointer_count {
