@@ -225,13 +225,8 @@ pub fn show_keyboard() {
 pub fn show_keyboard_with_type(keyboard_type: KeyboardType) {
     #[cfg(target_os = "ios")]
     {
-        if let Some(wrapper) = ios::ffi::IOS_WINDOW_LIST.get() {
-            unsafe {
-                let windows = &*wrapper.0.get();
-                if let Some(&window) = windows.last() {
-                    (*window).show_keyboard_with_type(keyboard_type);
-                }
-            }
+        if let Some(window) = ios::ffi::window_for_handle(ios::ffi::gpui_ios_get_window()) {
+            window.show_keyboard_with_type(keyboard_type);
         }
     }
     #[cfg(target_os = "android")]
@@ -252,13 +247,8 @@ pub fn show_keyboard_with_type(keyboard_type: KeyboardType) {
 pub fn hide_keyboard() {
     #[cfg(target_os = "ios")]
     {
-        if let Some(wrapper) = ios::ffi::IOS_WINDOW_LIST.get() {
-            unsafe {
-                let windows = &*wrapper.0.get();
-                if let Some(&window) = windows.last() {
-                    (*window).hide_keyboard();
-                }
-            }
+        if let Some(window) = ios::ffi::window_for_handle(ios::ffi::gpui_ios_get_window()) {
+            window.hide_keyboard();
         }
     }
     #[cfg(target_os = "android")]
@@ -306,13 +296,8 @@ pub fn set_keyboard_height(height: f32) {
 pub fn safe_area_insets() -> (f32, f32, f32, f32) {
     #[cfg(target_os = "ios")]
     {
-        if let Some(wrapper) = ios::ffi::IOS_WINDOW_LIST.get() {
-            unsafe {
-                let windows = &*wrapper.0.get();
-                if let Some(&window) = windows.last() {
-                    return (*window).safe_area_insets();
-                }
-            }
+        if let Some(window) = ios::ffi::window_for_handle(ios::ffi::gpui_ios_get_window()) {
+            return window.safe_area_insets();
         }
     }
     #[cfg(not(target_os = "ios"))]
