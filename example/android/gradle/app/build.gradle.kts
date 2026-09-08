@@ -96,6 +96,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":lumina-video-bridge"))
     // AndroidX core for NotificationCompat (used by GpuiNotifications)
     implementation("androidx.core:core:1.12.0")
     // AndroidX SplashScreen compat (used by GpuiActivity to hold splash until native init)

@@ -1,837 +1,339 @@
-//! Video player screen with playback controls, seek bar, volume & speed.
+//! Video and controls share GPUI's scene on both mobile platforms.
 
-use std::cell::RefCell;
-use std::time::Duration;
+use super::Router;
+use gpui::{div, prelude::*};
 
-use gpui::{div, prelude::*, px, rgb};
-use gpui_mobile::packages::media_session;
-use gpui_mobile::packages::video_player::VideoPlayer;
-
-use super::{
-    Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_SUBTEXT, LIGHT_TEXT, MAUVE, RED, SUBTEXT, SURFACE0,
-    TEXT, YELLOW,
-};
-
-/// Sample video URLs for demo.
-const VIDEOS: &[(&str, &str)] = &[
-    ("Big Buck Bunny", "https://lorem.video/bunny_720p"),
-    ("Cat", "https://lorem.video/hls/bunny/480p/media.m3u8"),
-];
-
+#[derive(Default)]
 pub(crate) struct VideoState {
-    player: Option<VideoPlayer>,
-    current_video: usize,
-    duration_ms: u64,
-    position_ms: u64,
-    video_width: u32,
-    video_height: u32,
-    volume: f32,
-    speed: f32,
-    looping: bool,
-    loading: bool,
-    error: Option<String>,
-    polling: bool,
-    surface_visible: bool,
+    pub fullscreen: bool,
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    player: Option<gpui_mobile::packages::video_player::GpuiVideoPlayer>,
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    selected: usize,
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    retire_pending: bool,
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    refresh_until: Option<std::time::Instant>,
 }
 
-impl Default for VideoState {
-    fn default() -> Self {
-        Self {
-            player: None,
-            current_video: 0,
-            duration_ms: 0,
-            position_ms: 0,
-            video_width: 0,
-            video_height: 0,
-            volume: 1.0,
-            speed: 1.0,
-            looping: false,
-            loading: false,
-            error: None,
-            polling: false,
-            surface_visible: false,
+impl VideoState {
+    pub fn dismiss(&mut self) {
+        self.fullscreen = false;
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Some(player) = self.player.as_mut() {
+            player.pause();
+            self.retire_pending = true;
+        }
+    }
+
+    pub fn retire_if_needed(&mut self, _window: &mut gpui::Window) {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if self.retire_pending {
+            if let Some(player) = self.player.as_mut() {
+                player.retire_external_frame(_window);
+            }
+            self.retire_pending = false;
         }
     }
 }
 
-thread_local! {
-    pub(crate) static VIDEO_STATE: RefCell<VideoState> = RefCell::new(VideoState::default());
-}
-
-pub fn reset_state() {
-    VIDEO_STATE.with(|s| {
-        let mut st = s.borrow_mut();
-        // Hide surface before dropping player
-        if st.surface_visible {
-            if let Some(ref mut p) = st.player {
-                let _ = p.hide_surface();
-            }
-        }
-        st.player.take(); // Drop calls dispose
-        *st = VideoState::default();
-    });
-}
-
-/// Called when navigating away from this screen — pauses playback and hides the native surface.
-pub fn dismiss() {
-    VIDEO_STATE.with(|s| {
-        let mut st = s.borrow_mut();
-        // Pause playback so audio doesn't continue in background
-        if let Some(ref p) = st.player {
-            let _ = p.pause();
-            let _ = media_session::set_playback_state(false, st.position_ms, st.speed);
-        }
-        if st.surface_visible {
-            if let Some(ref mut p) = st.player {
-                let _ = p.hide_surface();
-            }
-            st.surface_visible = false;
-        }
-    });
-}
-
-fn format_time(ms: u64) -> String {
-    let total_secs = ms / 1000;
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-    format!("{}:{:02}", mins, secs)
-}
-
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn render(
-    router: &Router,
-    window: &mut gpui::Window,
-    cx: &mut gpui::Context<Router>,
+    _router: &mut Router,
+    _window: &mut gpui::Window,
+    _cx: &mut gpui::Context<Router>,
 ) -> impl IntoElement {
-    let dark = router.dark_mode;
-    let text_color = if dark { TEXT } else { LIGHT_TEXT };
-    let sub_text = if dark { SUBTEXT } else { LIGHT_SUBTEXT };
-    let card_bg = if dark { SURFACE0 } else { LIGHT_CARD_BG };
-    let safe_area = router.safe_area;
-    let viewport_width = window.viewport_size().width.as_f32();
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child("Video playback is available in the Android and iOS app.")
+}
 
-    let (
-        position_ms,
-        duration_ms,
-        volume,
-        speed,
-        looping,
-        current_video,
-        loading,
-        error,
-        has_player,
-        is_playing,
-        video_width,
-        video_height,
-        surface_visible,
-    ) = VIDEO_STATE.with(|s| {
-        let st = s.borrow();
-        let playing = st
-            .player
-            .as_ref()
-            .and_then(|p| p.is_playing().ok())
-            .unwrap_or(false);
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub use mobile::render;
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod mobile {
+    use super::*;
+    use gpui::{px, rgb, SharedString};
+    use gpui_mobile::packages::video_player::{GpuiVideoPlayer, GpuiVideoPlayerConfig};
+    use std::time::{Duration, Instant};
+
+    const VIDEOS: &[(&str, &str)] = &[
+        ("Big Buck Bunny", "https://lorem.video/bunny_720p"),
         (
-            st.position_ms,
-            st.duration_ms,
-            st.volume,
-            st.speed,
-            st.looping,
-            st.current_video,
-            st.loading,
-            st.error.clone(),
-            st.player.is_some(),
-            playing,
-            st.video_width,
-            st.video_height,
-            st.surface_visible,
-        )
-    });
+            "Big Buck Bunny · HLS",
+            "https://lorem.video/hls/bunny/480p/media.m3u8",
+        ),
+    ];
 
-    let progress = if duration_ms > 0 {
-        (position_ms as f32 / duration_ms as f32).min(1.0)
-    } else {
-        0.0
-    };
-
-    // Video surface area height
-    const VIDEO_AREA_HEIGHT: f32 = 220.0;
-
-    // Update native surface position when visible.
-    // The video area is fixed at the top of the content area (below app bar).
-    // Position: safe_top + topAppBar(56)
-    if has_player && surface_visible {
-        let surface_y = safe_area.top + 56.0; // safe area + app bar
-        let surface_x = 0.0; // full width
-        let surface_w = viewport_width;
-
-        VIDEO_STATE.with(|s| {
-            let mut st = s.borrow_mut();
-            if let Some(ref mut p) = st.player {
-                let _ = p.show_surface(surface_x, surface_y, surface_w, VIDEO_AREA_HEIGHT);
+    impl VideoState {
+        fn load(&mut self, index: usize, cx: &gpui::App) {
+            let Some((_, url)) = VIDEOS.get(index) else {
+                return;
+            };
+            self.selected = index;
+            if let Some(player) = self.player.as_mut() {
+                player.open(*url, cx);
+            } else {
+                self.player = Some(GpuiVideoPlayer::with_config(
+                    *url,
+                    GpuiVideoPlayerConfig {
+                        autoplay: true,
+                        show_controls: false,
+                        ..Default::default()
+                    },
+                    cx,
+                ));
             }
-        });
+            self.refresh_until = Some(Instant::now() + Duration::from_secs(4));
+        }
     }
 
-    // Layout: fixed video area at top + scrollable controls below.
-    // The video SurfaceView is a native overlay positioned absolutely on screen,
-    // so it must NOT be inside a scroll container (it doesn't scroll with GPUI content).
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        // ── Fixed video area at top ─────────────────────
-        .child(
-            div()
-                .w_full()
-                .h(px(VIDEO_AREA_HEIGHT))
-                .bg(rgb(0x000000))
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(!has_player, |d| {
-                    d.child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(sub_text))
-                            .child("Select a video below"),
-                    )
-                })
-                .when(has_player && !surface_visible, |d| {
-                    d.child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(sub_text))
-                            .child("Tap to show video"),
-                    )
-                })
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|_this, _, _, cx| {
-                        VIDEO_STATE.with(|s| {
-                            let mut st = s.borrow_mut();
-                            if st.player.is_none() {
-                                return;
-                            }
-                            if !st.surface_visible {
-                                st.surface_visible = true;
-                            } else {
-                                // Toggle off
-                                if let Some(ref mut p) = st.player {
-                                    let _ = p.hide_surface();
-                                }
-                                st.surface_visible = false;
-                            }
-                        });
-                        cx.notify();
-                    }),
-                ),
-        )
-        // ── Scrollable controls area ────────────────────
-        .child(
-            div()
-                .id("video-controls-scroll")
-                .flex_1()
-                .overflow_y_scroll()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .w_full()
-                        .gap_4()
-                        .px_4()
-                        .py_4()
-                        // ── Video list ──────────────────────────────────
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(sub_text))
-                                .child("Select a video"),
-                        )
-                        .child({
-                            let mut list = div().flex().flex_col().gap_2();
-                            for (i, (name, _url)) in VIDEOS.iter().enumerate() {
-                                let is_current = i == current_video;
-                                let accent = if is_current { MAUVE } else { card_bg };
-                                let idx = i;
-                                list = list.child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_3()
-                                        .p_3()
-                                        .rounded_xl()
-                                        .bg(rgb(card_bg))
-                                        .border_l_4()
-                                        .border_color(rgb(accent))
-                                        .child(
-                                            div()
-                                                .text_xl()
-                                                .text_color(rgb(if is_current {
-                                                    MAUVE
-                                                } else {
-                                                    sub_text
-                                                }))
-                                                .child("🎬"),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .text_base()
-                                                .text_color(rgb(if is_current {
-                                                    MAUVE
-                                                } else {
-                                                    text_color
-                                                }))
-                                                .child(name.to_string()),
-                                        )
-                                        .when(is_current, |d| {
-                                            d.child(
-                                                div().text_xs().text_color(rgb(MAUVE)).child("NOW"),
-                                            )
-                                        })
-                                        .on_mouse_down(
-                                            gpui::MouseButton::Left,
-                                            cx.listener(move |_this, _, _, cx| {
-                                                load_video(idx, cx);
-                                            }),
-                                        ),
+    fn time(position: Duration) -> String {
+        format!("{}:{:02}", position.as_secs() / 60, position.as_secs() % 60)
+    }
+
+    fn control(
+        label: impl Into<SharedString>,
+        action: impl Fn(&mut VideoState) + 'static,
+        cx: &mut gpui::Context<Router>,
+    ) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .bg(rgb(0x313244))
+            .text_color(rgb(0xcdd6f4))
+            .child(label.into())
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |router, _, _, cx| {
+                    action(&mut router.video_state);
+                    // Keep polling briefly after paused seeks so their new preview
+                    // reaches the GPUI scene; this never advances the media clock.
+                    router.video_state.refresh_until =
+                        Some(Instant::now() + Duration::from_secs(4));
+                    cx.notify();
+                }),
+            )
+    }
+
+    pub fn render(
+        router: &mut Router,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Router>,
+    ) -> impl IntoElement {
+        let state = &mut router.video_state;
+        if state.player.is_none() {
+            state.load(state.selected, cx);
+        }
+        let fullscreen = state.fullscreen;
+        let selected = state.selected;
+        let Some(player) = state.player.as_mut() else {
+            return div().into_any_element();
+        };
+        player.update(window, cx);
+        if !player.is_error()
+            && (player.is_playing()
+                || player.current_textures().is_none()
+                || state
+                    .refresh_until
+                    .is_some_and(|deadline| Instant::now() < deadline))
+        {
+            window.request_animation_frame();
+        }
+        let position = player.position();
+        let duration = player.duration();
+        let progress = duration.filter(|d| !d.is_zero()).map_or(0.0, |d| {
+            (position.as_secs_f32() / d.as_secs_f32()).clamp(0.0, 1.0)
+        });
+        let playing = player.is_playing();
+        let muted = player.is_muted();
+        let volume = player.volume();
+        let has_subtitles = player.has_subtitles();
+        let mut picture = div()
+            .relative()
+            .w_full()
+            .min_h_0()
+            .bg(rgb(0))
+            .overflow_hidden()
+            .when(fullscreen, |d| d.flex_1())
+            .when(!fullscreen, |d| d.h(px(220.0)))
+            .child(player.surface_element());
+        if player.is_error() {
+            picture = picture.child(player.error_overlay());
+        } else if player.current_textures().is_none() {
+            picture = picture.child(player.loading_overlay());
+        }
+        if let Some(overlay) = player.buffering_overlay() {
+            picture = picture.child(overlay);
+        }
+        if let Some(overlay) = player.subtitle_overlay() {
+            picture = picture.child(overlay);
+        }
+
+        let mut controls = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .bg(rgb(0x181825))
+            .text_color(rgb(0xcdd6f4))
+            .child(div().text_sm().child(format!(
+                "{} / {}",
+                time(position),
+                duration.map(time).unwrap_or_else(|| "Live".into())
+            )))
+            .child(
+                div()
+                    .h(px(4.0))
+                    .w_full()
+                    .bg(rgb(0x45475a))
+                    .child(div().h_full().w(gpui::relative(progress)).bg(rgb(0x89b4fa))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(control(
+                        "−10 s",
+                        |state| {
+                            if let Some(player) = state.player.as_mut() {
+                                player.seek(
+                                    player.position().saturating_sub(Duration::from_secs(10)),
                                 );
                             }
-                            list
-                        })
-                        // ── Now playing card ────────────────────────────
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .p_4()
-                                .rounded_xl()
-                                .bg(rgb(card_bg))
-                                // Video title
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(
-                                            div()
-                                                .text_lg()
-                                                .text_color(rgb(text_color))
-                                                .child(VIDEOS[current_video].0.to_string()),
-                                        ),
-                                )
-                                // Video info
-                                .when(video_width > 0, |d| {
-                                    d.child(
-                                        div()
-                                            .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .justify_center()
-                                            .gap_3()
-                                            .child(
-                                                div().text_xs().text_color(rgb(sub_text)).child(
-                                                    format!("{}x{}", video_width, video_height),
-                                                ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(rgb(sub_text))
-                                                    .child(format_time(duration_ms)),
-                                            ),
-                                    )
-                                })
-                                // Status
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(if loading {
-                                                    YELLOW
-                                                } else {
-                                                    sub_text
-                                                }))
-                                                .child(if loading {
-                                                    "Loading...".to_string()
-                                                } else if is_playing {
-                                                    "Playing".to_string()
-                                                } else if has_player {
-                                                    "Paused".to_string()
-                                                } else {
-                                                    "Select a video".to_string()
-                                                }),
-                                        ),
-                                )
-                                // Progress bar
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .h(px(4.0))
-                                                .rounded_full()
-                                                .bg(rgb(if dark { 0x3A3A45 } else { 0xD0D0D8 }))
-                                                .child(
-                                                    div()
-                                                        .h(px(4.0))
-                                                        .rounded_full()
-                                                        .bg(rgb(MAUVE))
-                                                        .w(px(progress * 300.0)),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .justify_between()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(sub_text))
-                                                        .child(format_time(position_ms)),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(sub_text))
-                                                        .child(format_time(duration_ms)),
-                                                ),
-                                        ),
-                                )
-                                // Playback controls
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap_6()
-                                        // Previous
-                                        .child(
-                                            div()
-                                                .text_2xl()
-                                                .text_color(rgb(text_color))
-                                                .child("⏮")
-                                                .on_mouse_down(
-                                                    gpui::MouseButton::Left,
-                                                    cx.listener(|_this, _, _, cx| {
-                                                        let prev = VIDEO_STATE.with(|s| {
-                                                            let st = s.borrow();
-                                                            if st.current_video == 0 {
-                                                                VIDEOS.len() - 1
-                                                            } else {
-                                                                st.current_video - 1
-                                                            }
-                                                        });
-                                                        load_video(prev, cx);
-                                                    }),
-                                                ),
-                                        )
-                                        // Rewind 10s
-                                        .child(
-                                            div()
-                                                .text_xl()
-                                                .text_color(rgb(text_color))
-                                                .child("-10s")
-                                                .on_mouse_down(
-                                                    gpui::MouseButton::Left,
-                                                    cx.listener(|_this, _, _, cx| {
-                                                        VIDEO_STATE.with(|s| {
-                                                            let st = s.borrow();
-                                                            if let Some(ref p) = st.player {
-                                                                let pos = st
-                                                                    .position_ms
-                                                                    .saturating_sub(10_000);
-                                                                let _ = p.seek(pos);
-                                                            }
-                                                        });
-                                                        cx.notify();
-                                                    }),
-                                                ),
-                                        )
-                                        // Play/Pause
-                                        .child(
-                                            div()
-                                                .size(px(56.0))
-                                                .rounded_full()
-                                                .bg(rgb(MAUVE))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .child(
-                                                    div()
-                                                        .text_2xl()
-                                                        .text_color(rgb(0xFFFFFF))
-                                                        .child(if is_playing {
-                                                            "⏸"
-                                                        } else {
-                                                            "▶"
-                                                        }),
-                                                )
-                                                .on_mouse_down(
-                                                    gpui::MouseButton::Left,
-                                                    cx.listener(|_this, _, _, cx| {
-                                                        VIDEO_STATE.with(|s| {
-                                                            let st = s.borrow();
-                                                            if let Some(ref p) = st.player {
-                                                                if p.is_playing().unwrap_or(false) {
-                                                                    let _ = p.pause();
-                                                                } else {
-                                                                    let _ = p.play();
-                                                                }
-                                                            }
-                                                        });
-                                                        cx.notify();
-                                                    }),
-                                                ),
-                                        )
-                                        // Forward 10s
-                                        .child(
-                                            div()
-                                                .text_xl()
-                                                .text_color(rgb(text_color))
-                                                .child("+10s")
-                                                .on_mouse_down(
-                                                    gpui::MouseButton::Left,
-                                                    cx.listener(|_this, _, _, cx| {
-                                                        VIDEO_STATE.with(|s| {
-                                                            let st = s.borrow();
-                                                            if let Some(ref p) = st.player {
-                                                                let pos = (st.position_ms + 10_000)
-                                                                    .min(st.duration_ms);
-                                                                let _ = p.seek(pos);
-                                                            }
-                                                        });
-                                                        cx.notify();
-                                                    }),
-                                                ),
-                                        )
-                                        // Next
-                                        .child(
-                                            div()
-                                                .text_2xl()
-                                                .text_color(rgb(text_color))
-                                                .child("⏭")
-                                                .on_mouse_down(
-                                                    gpui::MouseButton::Left,
-                                                    cx.listener(|_this, _, _, cx| {
-                                                        let next = VIDEO_STATE.with(|s| {
-                                                            let st = s.borrow();
-                                                            (st.current_video + 1) % VIDEOS.len()
-                                                        });
-                                                        load_video(next, cx);
-                                                    }),
-                                                ),
-                                        ),
-                                ),
-                        )
-                        // ── Volume ──────────────────────────────────────
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .p_4()
-                                .rounded_xl()
-                                .bg(rgb(card_bg))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(text_color))
-                                                .child("Volume"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(sub_text))
-                                                .child(format!("{}%", (volume * 100.0) as u32)),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .justify_center()
-                                        .gap_3()
-                                        .child(vol_btn("25%", 0.25, cx))
-                                        .child(vol_btn("50%", 0.5, cx))
-                                        .child(vol_btn("75%", 0.75, cx))
-                                        .child(vol_btn("100%", 1.0, cx)),
-                                ),
-                        )
-                        // ── Speed ───────────────────────────────────────
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .p_4()
-                                .rounded_xl()
-                                .bg(rgb(card_bg))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(text_color))
-                                                .child("Playback Speed"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(sub_text))
-                                                .child(format!("{:.1}x", speed)),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .justify_center()
-                                        .gap_3()
-                                        .child(spd_btn("0.5x", 0.5, cx))
-                                        .child(spd_btn("1.0x", 1.0, cx))
-                                        .child(spd_btn("1.5x", 1.5, cx))
-                                        .child(spd_btn("2.0x", 2.0, cx)),
-                                ),
-                        )
-                        // ── Loop toggle ─────────────────────────────────
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .p_4()
-                                .rounded_xl()
-                                .bg(rgb(card_bg))
-                                .child(div().text_sm().text_color(rgb(text_color)).child("Loop"))
-                                .child(
-                                    div()
-                                        .px_4()
-                                        .py_1()
-                                        .rounded_lg()
-                                        .bg(rgb(if looping { GREEN } else { 0x3A3A45 }))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(0xFFFFFF))
-                                                .child(if looping { "ON" } else { "OFF" }),
-                                        )
-                                        .on_mouse_down(
-                                            gpui::MouseButton::Left,
-                                            cx.listener(|_this, _, _, cx| {
-                                                VIDEO_STATE.with(|s| {
-                                                    let mut st = s.borrow_mut();
-                                                    st.looping = !st.looping;
-                                                    if let Some(ref p) = st.player {
-                                                        let _ = p.set_looping(st.looping);
-                                                    }
-                                                });
-                                                cx.notify();
-                                            }),
-                                        ),
-                                ),
-                        )
-                        // ── Error display ───────────────────────────────
-                        .when(error.is_some(), |d| {
-                            d.child(
-                                div().p_3().rounded_xl().bg(rgb(0x3D1111)).child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(RED))
-                                        .child(error.unwrap_or_default()),
-                                ),
-                            )
-                        }),
-                ), // close .child(inner flex_col div)
-        ) // close .child(scroll container)
-}
-
-fn vol_btn(label: &str, vol: f32, cx: &mut gpui::Context<Router>) -> impl IntoElement {
-    div()
-        .px_3()
-        .py_1()
-        .rounded_lg()
-        .bg(rgb(BLUE))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(0xFFFFFF))
-                .child(label.to_string()),
-        )
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(move |_this, _, _, cx| {
-                VIDEO_STATE.with(|s| {
-                    let mut st = s.borrow_mut();
-                    st.volume = vol;
-                    if let Some(ref p) = st.player {
-                        let _ = p.set_volume(vol);
+                        },
+                        cx,
+                    ))
+                    .child(control(
+                        if playing { "Pause" } else { "Play" },
+                        |state| {
+                            if let Some(player) = state.player.as_mut() {
+                                player.toggle_playback();
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(control(
+                        "+10 s",
+                        |state| {
+                            if let Some(player) = state.player.as_mut() {
+                                let target =
+                                    player.position().saturating_add(Duration::from_secs(10));
+                                player.seek(
+                                    player
+                                        .duration()
+                                        .map_or(target, |duration| target.min(duration)),
+                                );
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(control(
+                        if fullscreen {
+                            "Exit fullscreen"
+                        } else {
+                            "Fullscreen"
+                        },
+                        |state| {
+                            state.fullscreen = !state.fullscreen;
+                        },
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(control(
+                        if muted { "Unmute" } else { "Mute" },
+                        |state| {
+                            if let Some(player) = state.player.as_mut() {
+                                player.toggle_mute();
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(control(
+                        "Volume −",
+                        |state| {
+                            if let Some(player) = state.player.as_mut() {
+                                player.set_volume((player.volume() - 0.1).max(0.0));
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(div().text_sm().child(format!("{:.0}%", volume * 100.0)))
+                    .child(control(
+                        "Volume +",
+                        |state| {
+                            if let Some(player) = state.player.as_mut() {
+                                player.set_volume((player.volume() + 0.1).min(1.0));
+                            }
+                        },
+                        cx,
+                    )),
+            );
+        if has_subtitles {
+            controls = controls.child(control(
+                "Subtitles",
+                |state| {
+                    if let Some(player) = state.player.as_mut() {
+                        player.toggle_subtitles();
                     }
-                });
-                cx.notify();
-            }),
-        )
-}
-
-fn spd_btn(label: &str, spd: f32, cx: &mut gpui::Context<Router>) -> impl IntoElement {
-    div()
-        .px_3()
-        .py_1()
-        .rounded_lg()
-        .bg(rgb(MAUVE))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(0xFFFFFF))
-                .child(label.to_string()),
-        )
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(move |_this, _, _, cx| {
-                VIDEO_STATE.with(|s| {
-                    let mut st = s.borrow_mut();
-                    st.speed = spd;
-                    if let Some(ref p) = st.player {
-                        let _ = p.set_speed(spd);
-                    }
-                });
-                cx.notify();
-            }),
-        )
-}
-
-fn load_video(index: usize, cx: &mut gpui::Context<Router>) {
-    let url = VIDEOS[index].1;
-    let title = VIDEOS[index].0;
-
-    // Initialize media session on first use
-    let _ = media_session::init();
-
-    VIDEO_STATE.with(|s| {
-        let mut st = s.borrow_mut();
-        st.current_video = index;
-        st.loading = true;
-        st.error = None;
-        st.position_ms = 0;
-        st.duration_ms = 0;
-        st.video_width = 0;
-        st.video_height = 0;
-
-        // Create player if needed
-        if st.player.is_none() {
-            match VideoPlayer::new() {
-                Ok(p) => st.player = Some(p),
-                Err(e) => {
-                    st.error = Some(format!("Failed to create player: {}", e));
-                    st.loading = false;
-                    return;
-                }
-            }
+                },
+                cx,
+            ));
         }
-
-        let vol = st.volume;
-        let spd = st.speed;
-        let lp = st.looping;
-        if let Some(player) = st.player.take() {
-            match player.set_url(url) {
-                Ok(info) => {
-                    st.duration_ms = info.duration_ms;
-                    st.video_width = info.width;
-                    st.video_height = info.height;
-                    st.loading = false;
-                    let _ = player.set_volume(vol);
-                    let _ = player.set_speed(spd);
-                    let _ = player.set_looping(lp);
-                    let _ = player.play();
-                    st.surface_visible = true;
-
-                    // Update media session
-                    let _ = media_session::set_metadata(title, "GPUI Video", info.duration_ms);
-                    let _ = media_session::set_playback_state(true, 0, spd);
-                }
-                Err(e) => {
-                    st.error = Some(format!("Failed to load: {}", e));
-                    st.loading = false;
-                }
+        if !fullscreen {
+            let mut sources = div().flex().flex_col().gap_2();
+            for (index, (title, _)) in VIDEOS.iter().enumerate() {
+                sources = sources.child(
+                    div()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(rgb(if selected == index {
+                            0x45475a
+                        } else {
+                            0x313244
+                        }))
+                        .child(*title)
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |router, _, window, cx| {
+                                if let Some(player) = router.video_state.player.as_mut() {
+                                    player.retire_external_frame(window);
+                                }
+                                router.video_state.load(index, cx);
+                                cx.notify();
+                            }),
+                        ),
+                );
             }
-            st.player = Some(player);
+            controls = controls.child(sources);
         }
-    });
-
-    start_position_polling(cx);
-    cx.notify();
-}
-
-fn start_position_polling(cx: &mut gpui::Context<Router>) {
-    let already_polling = VIDEO_STATE.with(|s| s.borrow().polling);
-    if already_polling {
-        return;
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .bg(rgb(0))
+            .child(picture)
+            .child(
+                div()
+                    .id("video-controls")
+                    .max_h(px(if fullscreen { 160.0 } else { 420.0 }))
+                    .overflow_y_scroll()
+                    .child(controls),
+            )
+            .into_any_element()
     }
-    VIDEO_STATE.with(|s| s.borrow_mut().polling = true);
-
-    cx.spawn(async |this, cx| {
-        loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(500))
-                .await;
-
-            let should_stop = VIDEO_STATE.with(|s| {
-                let st = s.borrow();
-                if let Some(ref p) = st.player {
-                    let pos = p.position().ok();
-                    let dur = p.duration().ok();
-                    let playing = p.is_playing().unwrap_or(false);
-                    drop(st);
-                    let mut st = s.borrow_mut();
-                    if let Some(pos) = pos {
-                        st.position_ms = pos;
-                    }
-                    if let Some(dur) = dur {
-                        if dur > 0 {
-                            st.duration_ms = dur;
-                        }
-                    }
-                    // Update media session with current position
-                    let _ = media_session::set_playback_state(playing, st.position_ms, st.speed);
-                    false
-                } else {
-                    true
-                }
-            });
-
-            let update_ok = this.update(cx, |_this, cx| {
-                cx.notify();
-            });
-
-            if should_stop || update_ok.is_err() {
-                VIDEO_STATE.with(|s| s.borrow_mut().polling = false);
-                break;
-            }
-        }
-    })
-    .detach();
 }

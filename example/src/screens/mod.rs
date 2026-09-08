@@ -191,6 +191,7 @@ pub struct Router {
     animation_playground: Option<AnimationPlayground>,
     /// The shader showcase demo (lazily created when the screen is visited).
     shader_showcase: Option<ShaderShowcase>,
+    video_state: video_player::VideoState,
 }
 
 impl Router {
@@ -227,6 +228,7 @@ impl Router {
             safe_area,
             animation_playground: None,
             shader_showcase: None,
+            video_state: video_player::VideoState::default(),
         }
     }
 
@@ -291,7 +293,7 @@ impl Router {
             }
             // Dismiss video surface when leaving video player
             if self.current_screen == Screen::VideoPlayer {
-                video_player::dismiss();
+                self.video_state.dismiss();
             }
             // Pause audio when leaving audio player
             if self.current_screen == Screen::AudioPlayer {
@@ -324,6 +326,10 @@ impl Router {
 
     /// Go back to the previous screen. Returns `true` if navigation occurred.
     pub fn go_back(&mut self) -> bool {
+        if self.current_screen == Screen::VideoPlayer && self.video_state.fullscreen {
+            self.video_state.fullscreen = false;
+            return true;
+        }
         if let Some(prev) = self.history.pop() {
             // Dismiss webview when leaving browser
             if self.current_screen == Screen::WebViewBrowser {
@@ -331,7 +337,7 @@ impl Router {
             }
             // Dismiss video surface when leaving video player
             if self.current_screen == Screen::VideoPlayer {
-                video_player::dismiss();
+                self.video_state.dismiss();
             }
             // Pause audio when leaving audio player
             if self.current_screen == Screen::AudioPlayer {
@@ -362,6 +368,16 @@ impl Router {
 impl Render for Router {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         log::trace!("Router: render() screen={:?}", self.current_screen);
+        self.video_state.retire_if_needed(window);
+        if self.current_screen == Screen::VideoPlayer && self.video_state.fullscreen {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(rgb(0))
+                .child(self.render_video_player_screen(window, cx))
+                .into_any_element();
+        }
         let show_tab_bar = self.current_screen.is_tab_root();
         let theme =
             gpui_mobile::components::material::MaterialTheme::from_appearance(self.dark_mode);
@@ -647,7 +663,7 @@ impl Router {
     }
 
     fn render_video_player_screen(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -793,5 +809,30 @@ impl Router {
             } else {
                 div().into_any_element()
             })
+    }
+}
+
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod video_navigation_tests {
+    use super::*;
+
+    #[test]
+    fn back_exits_video_fullscreen_before_leaving_the_page() {
+        let mut router = Router::with_initial_screen(Screen::VideoPlayer);
+        router.video_state.fullscreen = true;
+        assert!(router.go_back());
+        assert_eq!(router.current_screen, Screen::VideoPlayer);
+        assert!(!router.video_state.fullscreen);
+        assert!(router.go_back());
+        assert_eq!(router.current_screen, Screen::Home);
+    }
+
+    #[test]
+    fn navigating_away_does_not_restore_fullscreen_on_return() {
+        let mut router = Router::with_initial_screen(Screen::VideoPlayer);
+        router.video_state.fullscreen = true;
+        router.navigate_to(Screen::Home);
+        router.navigate_to(Screen::VideoPlayer);
+        assert!(!router.video_state.fullscreen);
     }
 }

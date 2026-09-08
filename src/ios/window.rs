@@ -678,43 +678,22 @@ impl IosWindow {
 
             // Build a temporary surface for WgpuContext initialisation
             // (adapter selection needs a surface to test compatibility).
-            let window_handle = raw_window
-                .window_handle()
-                .expect("iOS window handle unavailable");
+            let window_handle = raw_window.window_handle()?;
 
             let target = wgpu::SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle: None,
                 raw_window_handle: window_handle.as_raw(),
             };
 
-            let surface_result = metal_instance.create_surface_unsafe(target);
-            match surface_result {
-                Ok(surface) => match WgpuContext::new(metal_instance, &surface, None) {
-                    Ok(context) => {
-                        // Pre-populate gpu_context so WgpuRenderer::new()
-                        // reuses our Metal-backed context (and its instance)
-                        // instead of creating a Vulkan+GL one.
-                        let gpu_context: GpuContext = Rc::new(RefCell::new(Some(context)));
-                        drop(surface); // no longer needed — new() creates its own
-
-                        match WgpuRenderer::new(gpu_context, &raw_window, config, None) {
-                            Ok(renderer) => {
-                                log::info!("iOS wgpu renderer created (Metal)");
-                                *ios_window.renderer.lock() = Some(renderer);
-                            }
-                            Err(e) => {
-                                log::error!("Failed to create iOS wgpu renderer: {e:#}");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Failed to create iOS WgpuContext: {e:#}");
-                    }
-                },
-                Err(e) => {
-                    log::error!("Failed to create iOS wgpu Metal surface: {e:#}");
-                }
-            }
+            // Fail window creation if GPUI cannot present. Returning a window
+            // without a renderer would silently strand video on a black surface.
+            let surface = metal_instance.create_surface_unsafe(target)?;
+            let context = WgpuContext::new(metal_instance, &surface, None)?;
+            let gpu_context: GpuContext = Rc::new(RefCell::new(Some(context)));
+            drop(surface); // WgpuRenderer creates its own presentation surface.
+            let renderer = WgpuRenderer::new(gpu_context, &raw_window, config, None)?;
+            log::info!("iOS wgpu renderer created (Metal)");
+            *ios_window.renderer.lock() = Some(renderer);
 
             Ok(ios_window)
         }

@@ -81,13 +81,13 @@ public class GpuiPlatformView {
      * Create a new platform view and add it to the view hierarchy.
      *
      * @param activity       The hosting Activity
-     * @param viewType       The type of view to create (e.g., "container", "video_player", "webview")
+     * @param viewType       The type of view to create (e.g., "container", "webview")
      * @param viewId         Unique ID for this view instance
      * @param x              Left position in logical pixels
      * @param y              Top position in logical pixels
      * @param width          Width in logical pixels
      * @param height         Height in logical pixels
-     * @param creationParams Pipe-delimited key=value pairs (e.g., "player_id=1|url=https://...")
+     * @param creationParams Pipe-delimited key=value pairs (e.g., "url=https://...|javascript_enabled=true")
      * @return true if the view was created successfully
      */
     public static boolean createView(
@@ -174,9 +174,6 @@ public class GpuiPlatformView {
                 frame.setBackgroundColor(0x00000000);
                 return frame;
 
-            case "video_player":
-                return createVideoPlayerView(activity, params);
-
             case "webview":
                 return createWebViewView(activity, params);
 
@@ -193,20 +190,6 @@ public class GpuiPlatformView {
                 Log.w(TAG, "Unknown view type: " + viewType + ", creating empty container");
                 return new FrameLayout(activity);
         }
-    }
-
-    /**
-     * Create a TextureView for video playback and wire it to the MediaPlayer.
-     */
-    private static View createVideoPlayerView(Activity activity, Map<String, String> params) {
-        int playerId = 0;
-        try {
-            playerId = Integer.parseInt(params.getOrDefault("player_id", "0"));
-        } catch (NumberFormatException e) {
-            Log.w(TAG, "Invalid player_id in creation params");
-        }
-
-        return GpuiVideoPlayer.createVideoSurface(activity, playerId);
     }
 
     /**

@@ -1292,19 +1292,10 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                     .gap_2()
                     .p_3()
                     .child(action_button(
-                        "Create",
+                        "Open player",
                         MAUVE,
-                        cx.listener(|_this, _, _, cx| {
-                            PACKAGES_STATE.with(|s| {
-                                let mut state = s.borrow_mut();
-                                match gpui_mobile::packages::video_player::VideoPlayer::new() {
-                                    Ok(p) => {
-                                        state.video_status = Some("Player created".into());
-                                        std::mem::forget(p); // leak for demo simplicity
-                                    }
-                                    Err(e) => state.video_status = Some(format!("Error: {e}")),
-                                }
-                            });
+                        cx.listener(|this, _, _, cx| {
+                            this.navigate_to(super::Screen::VideoPlayer);
                             cx.notify();
                         }),
                     ))

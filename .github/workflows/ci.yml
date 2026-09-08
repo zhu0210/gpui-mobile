@@ -165,6 +165,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Check out Lumina Android bridge
+        uses: actions/checkout@v6
+        with:
+          repository: zhu0210/lumina-video-gpui
+          ref: de9666cf42ca494cf575c7ce7337dd8f0827b44b
+          path: .dependencies/lumina-video
+
       - name: Install Rust toolchain + Android target
         uses: dtolnay/rust-toolchain@stable
         with:

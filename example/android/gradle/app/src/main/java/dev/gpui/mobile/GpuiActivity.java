@@ -12,6 +12,8 @@ import android.view.KeyEvent;
 
 import androidx.core.splashscreen.SplashScreen;
 
+import com.luminavideo.bridge.LuminaVideo;
+
 /**
  * Custom Activity extending NativeActivity that integrates with the
  * AndroidX SplashScreen API.
@@ -70,6 +72,8 @@ public class GpuiActivity extends NativeActivity {
         // rather than the ringer/notification volume.
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
+        // NativeActivity starts Rust during onCreate; its decoder needs this bridge ready.
+        LuminaVideo.init(this);
         super.onCreate(savedInstanceState);
     }
 
@@ -128,7 +132,12 @@ public class GpuiActivity extends NativeActivity {
     protected void onDestroy() {
         // Release media session when activity is destroyed.
         GpuiMediaSession.release();
-        super.onDestroy();
+        try {
+            // Stop Rust playback before releasing any remaining native-frame players.
+            super.onDestroy();
+        } finally {
+            LuminaVideo.shutdown();
+        }
     }
 
     /**
