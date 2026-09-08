@@ -47,11 +47,18 @@ cd ios && xcodegen generate --spec project.yml
 xcodebuild -project GpuiExample.xcodeproj -scheme GpuiExample build
 
 # Android
+# From the repository root; keep the bridge at the Cargo dependency revision.
+git clone https://github.com/zhu0210/lumina-video-gpui.git .dependencies/lumina-video
+git -C .dependencies/lumina-video checkout 7a7b6149956a4a646e7517d0f1c2106f1669f88d
 rustup target add aarch64-linux-android
 cd example
-cargo ndk -t arm64-v8a -P 31 -o android/gradle/app/src/main/jniLibs build
+cargo ndk -t arm64-v8a -P 26 --link-libcxx-shared -o android/gradle/app/src/main/jniLibs build --locked
 cd android/gradle && ./gradlew assembleDebug
 ```
+
+Video playback uses Lumina native frames in the GPUI scene on Android and iOS.
+Video, controls, subtitles and fullscreen do not use native view overlays.
+For a separate local Lumina checkout, pass `-PluminaVideoDir=/path/to/lumina-video` to Gradle.
 
 ## Platform Support
 

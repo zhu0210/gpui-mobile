@@ -62,17 +62,18 @@ mod mobile {
     use gpui_mobile::packages::video_player::{GpuiVideoPlayer, GpuiVideoPlayerConfig};
     use std::time::{Duration, Instant};
 
-    const VIDEOS: &[(&str, &str)] = &[
-        ("Big Buck Bunny", "https://lorem.video/bunny_720p"),
+    const VIDEOS: &[(&str, &str, bool)] = &[
+        ("Big Buck Bunny", "https://lorem.video/bunny_720p", false),
         (
-            "Big Buck Bunny · HLS",
+            "Big Buck Bunny · HLS · LIVE",
             "https://lorem.video/hls/bunny/480p/media.m3u8",
+            true,
         ),
     ];
 
     impl VideoState {
         fn load(&mut self, index: usize, cx: &gpui::App) {
-            let Some((_, url)) = VIDEOS.get(index) else {
+            let Some((_, url, _)) = VIDEOS.get(index) else {
                 return;
             };
             self.selected = index;
@@ -99,7 +100,7 @@ mod mobile {
 
     fn control(
         label: impl Into<SharedString>,
-        action: impl Fn(&mut VideoState) + 'static,
+        action: impl Fn(&mut VideoState, &gpui::App) + 'static,
         cx: &mut gpui::Context<Router>,
     ) -> impl IntoElement {
         div()
@@ -112,7 +113,7 @@ mod mobile {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |router, _, _, cx| {
-                    action(&mut router.video_state);
+                    action(&mut router.video_state, cx);
                     // Keep polling briefly after paused seeks so their new preview
                     // reaches the GPUI scene; this never advances the media clock.
                     router.video_state.refresh_until =
@@ -133,6 +134,7 @@ mod mobile {
         }
         let fullscreen = state.fullscreen;
         let selected = state.selected;
+        let live = VIDEOS.get(selected).is_some_and(|(_, _, live)| *live);
         let Some(player) = state.player.as_mut() else {
             return div().into_any_element();
         };
@@ -152,6 +154,7 @@ mod mobile {
             (position.as_secs_f32() / d.as_secs_f32()).clamp(0.0, 1.0)
         });
         let playing = player.is_playing();
+        let failed = player.is_error();
         let muted = player.is_muted();
         let volume = player.volume();
         let has_subtitles = player.has_subtitles();
@@ -183,65 +186,86 @@ mod mobile {
             .p_3()
             .bg(rgb(0x181825))
             .text_color(rgb(0xcdd6f4))
-            .child(div().text_sm().child(format!(
-                "{} / {}",
-                time(position),
-                duration.map(time).unwrap_or_else(|| "Live".into())
-            )))
-            .child(
-                div()
-                    .h(px(4.0))
-                    .w_full()
-                    .bg(rgb(0x45475a))
-                    .child(div().h_full().w(gpui::relative(progress)).bg(rgb(0x89b4fa))),
-            )
+            .when(live, |d| {
+                d.child(div().text_sm().text_color(rgb(0xf38ba8)).child("LIVE"))
+            })
+            .when(!live, |d| {
+                d.child(div().text_sm().child(format!(
+                    "{} / {}",
+                    time(position),
+                    duration.map(time).unwrap_or_else(|| "—".into())
+                )))
+                .child(
+                    div()
+                        .h(px(4.0))
+                        .w_full()
+                        .bg(rgb(0x45475a))
+                        .child(div().h_full().w(gpui::relative(progress)).bg(rgb(0x89b4fa))),
+                )
+            })
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .gap_2()
+                    .when(!live, |d| {
+                        d.child(control(
+                            "−10 s",
+                            |state, _| {
+                                if let Some(player) = state.player.as_mut() {
+                                    player.seek(
+                                        player.position().saturating_sub(Duration::from_secs(10)),
+                                    );
+                                }
+                            },
+                            cx,
+                        ))
+                    })
                     .child(control(
-                        "−10 s",
-                        |state| {
-                            if let Some(player) = state.player.as_mut() {
-                                player.seek(
-                                    player.position().saturating_sub(Duration::from_secs(10)),
-                                );
-                            }
+                        if failed {
+                            "Retry"
+                        } else if playing {
+                            "Pause"
+                        } else {
+                            "Play"
                         },
-                        cx,
-                    ))
-                    .child(control(
-                        if playing { "Pause" } else { "Play" },
-                        |state| {
-                            if let Some(player) = state.player.as_mut() {
+                        |state, cx| {
+                            if state
+                                .player
+                                .as_ref()
+                                .is_some_and(|player| player.is_error())
+                            {
+                                state.load(state.selected, cx);
+                            } else if let Some(player) = state.player.as_mut() {
                                 player.toggle_playback();
                             }
                         },
                         cx,
                     ))
-                    .child(control(
-                        "+10 s",
-                        |state| {
-                            if let Some(player) = state.player.as_mut() {
-                                let target =
-                                    player.position().saturating_add(Duration::from_secs(10));
-                                player.seek(
-                                    player
-                                        .duration()
-                                        .map_or(target, |duration| target.min(duration)),
-                                );
-                            }
-                        },
-                        cx,
-                    ))
+                    .when(!live, |d| {
+                        d.child(control(
+                            "+10 s",
+                            |state, _| {
+                                if let Some(player) = state.player.as_mut() {
+                                    let target =
+                                        player.position().saturating_add(Duration::from_secs(10));
+                                    player.seek(
+                                        player
+                                            .duration()
+                                            .map_or(target, |duration| target.min(duration)),
+                                    );
+                                }
+                            },
+                            cx,
+                        ))
+                    })
                     .child(control(
                         if fullscreen {
                             "Exit fullscreen"
                         } else {
                             "Fullscreen"
                         },
-                        |state| {
+                        |state, _| {
                             state.fullscreen = !state.fullscreen;
                         },
                         cx,
@@ -255,7 +279,7 @@ mod mobile {
                     .gap_2()
                     .child(control(
                         if muted { "Unmute" } else { "Mute" },
-                        |state| {
+                        |state, _| {
                             if let Some(player) = state.player.as_mut() {
                                 player.toggle_mute();
                             }
@@ -264,7 +288,7 @@ mod mobile {
                     ))
                     .child(control(
                         "Volume −",
-                        |state| {
+                        |state, _| {
                             if let Some(player) = state.player.as_mut() {
                                 player.set_volume((player.volume() - 0.1).max(0.0));
                             }
@@ -274,7 +298,7 @@ mod mobile {
                     .child(div().text_sm().child(format!("{:.0}%", volume * 100.0)))
                     .child(control(
                         "Volume +",
-                        |state| {
+                        |state, _| {
                             if let Some(player) = state.player.as_mut() {
                                 player.set_volume((player.volume() + 0.1).min(1.0));
                             }
@@ -285,7 +309,7 @@ mod mobile {
         if has_subtitles {
             controls = controls.child(control(
                 "Subtitles",
-                |state| {
+                |state, _| {
                     if let Some(player) = state.player.as_mut() {
                         player.toggle_subtitles();
                     }
@@ -295,7 +319,7 @@ mod mobile {
         }
         if !fullscreen {
             let mut sources = div().flex().flex_col().gap_2();
-            for (index, (title, _)) in VIDEOS.iter().enumerate() {
+            for (index, (title, _, _)) in VIDEOS.iter().enumerate() {
                 sources = sources.child(
                     div()
                         .p_3()

@@ -156,6 +156,11 @@
     // gpui_ios_run_demo() is defined in gpui-mobile and starts the run loop.
     NSLog(@"Starting GPUI app...");
     gpui_ios_register_app();
+    // Deliver a cold-launch URL before the Router chooses its initial screen.
+    NSURL *launchURL = launchOptions[UIApplicationLaunchOptionsURLKey];
+    if (launchURL) {
+        gpui_ios_handle_open_url((__bridge void *)launchURL.absoluteString);
+    }
     gpui_ios_run_demo();
     NSLog(@"GPUI app initialized");
 

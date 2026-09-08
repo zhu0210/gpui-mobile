@@ -104,6 +104,102 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/gpui-example-${{ matrix.label }}" \
             CODE_SIGNING_ALLOWED=NO build
 
+      - name: Smoke test GPUI video on an iPhone simulator
+        if: matrix.label == 'simulator'
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import time
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "gpui-ios-playback"
+          output.mkdir()
+          app = Path(os.environ["RUNNER_TEMP"]) / "gpui-example-simulator/Build/Products/Debug-iphonesimulator/GpuiExample.app"
+          assert app.is_dir(), f"Missing simulator app: {app}"
+
+          def simctl(*args, timeout=30):
+              result = subprocess.run(["xcrun", "simctl", *args], capture_output=True, text=True, timeout=timeout)
+              if result.returncode:
+                  raise RuntimeError(f"simctl {args}: {result.stdout} {result.stderr}")
+              return result.stdout
+
+          inventory = json.loads(simctl("list", "devices", "available", "--json"))
+          runtime, device = next(
+              (runtime, device)
+              for runtime, devices in inventory["devices"].items()
+              for device in devices
+              if ".iOS-" in runtime and device.get("isAvailable") and device["name"].startswith("iPhone")
+          )
+          udid = simctl("create", "GPUI playback CI", device["deviceTypeIdentifier"], runtime).strip()
+          (output / "simulator.json").write_text(json.dumps({"udid": udid, "runtime": runtime, "device": device}, indent=2))
+          app_pid = None
+
+          def read_app_log():
+              raw = simctl("spawn", udid, "log", "show", "--style", "json", "--last", "5m",
+                           "--info", "--debug", "--predicate", 'process == "GpuiExample"')
+              (output / "app-log.json").write_text(raw)
+              events = json.loads(raw)
+              messages = "\n".join(event.get("eventMessage", "") for event in events)
+              (output / "app-log.txt").write_text(messages)
+              return events, messages
+
+          def check_playback():
+              global app_pid
+              events, messages = read_app_log()
+              assert not re.search(r"GPUI PANIC|panicked at|terminating app due to uncaught exception", messages, re.I), messages
+              for event in events:
+                  if "Initial screen: VideoPlayer" in event.get("eventMessage", ""):
+                      app_pid = int(event["processID"])
+                      break
+              if app_pid is not None:
+                  os.kill(app_pid, 0)  # Simulator app PIDs belong to the macOS host.
+              return all(marker in messages for marker in (
+                  "Initial screen: VideoPlayer",
+                  "iOS wgpu renderer created (Metal)",
+                  "First video frame prepared for GPU rendering",
+              ))
+
+          try:
+              simctl("boot", udid)
+              simctl("bootstatus", udid, "-b", timeout=180)
+              simctl("install", udid, str(app), timeout=60)
+              # Cold URL launch exercises normal app routing and autoplay.
+              simctl("openurl", udid, "gpui://video_player")
+              deadline = time.monotonic() + 60
+              while not check_playback():
+                  assert time.monotonic() < deadline, "No GPUI video frame within 60 seconds; inspect app-log.txt"
+                  time.sleep(2)
+              simctl("io", udid, "screenshot", str(output / "playback-start.png"))
+              for _ in range(5):
+                  time.sleep(2)
+                  assert check_playback(), "Playback diagnostics disappeared"
+              simctl("io", udid, "screenshot", str(output / "playback-after-10s.png"))
+              print("GPUI Metal renderer and video frame observed; app survived 10 seconds of playback.")
+          finally:
+              # Keep evidence on failure, and remove only the simulator created here.
+              try:
+                  read_app_log()
+                  simctl("io", udid, "screenshot", str(output / "final.png"))
+              finally:
+                  try:
+                      simctl("shutdown", udid)
+                  finally:
+                      simctl("delete", udid)
+          PY
+
+      - name: Upload iOS playback evidence
+        if: always() && matrix.label == 'simulator'
+        uses: actions/upload-artifact@v7
+        with:
+          name: gpui-example-ios-playback
+          path: ${{ runner.temp }}/gpui-ios-playback
+          if-no-files-found: error
+
       - name: Upload iOS application (${{ matrix.label }})
         uses: actions/upload-artifact@v7
         with:
@@ -169,7 +265,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: zhu0210/lumina-video-gpui
-          ref: de9666cf42ca494cf575c7ce7337dd8f0827b44b
+          ref: 7a7b6149956a4a646e7517d0f1c2106f1669f88d
           path: .dependencies/lumina-video
 
       - name: Install Rust toolchain + Android target
@@ -211,9 +307,10 @@ jobs:
         run: |
           cargo ndk \
             -t arm64-v8a \
-            -P 31 \
+            -P 26 \
+            --link-libcxx-shared \
             -o android/gradle/app/src/main/jniLibs \
-            build
+            build --locked
 
       - name: Assemble debug APK
         working-directory: example/android/gradle

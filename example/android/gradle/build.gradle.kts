@@ -37,8 +37,10 @@ tasks.register<Exec>("buildRustRelease") {
     commandLine(
         "cargo", "ndk",
         "-t", "arm64-v8a",
+        "-P", "26",
+        "--link-libcxx-shared",
         "-o", "android/gradle/app/src/main/jniLibs",
-        "build", "--lib", "--release"
+        "build", "--locked", "--lib", "--release"
     )
 }
 
@@ -49,8 +51,10 @@ tasks.register<Exec>("buildRustDebug") {
     commandLine(
         "cargo", "ndk",
         "-t", "arm64-v8a",
+        "-P", "26",
+        "--link-libcxx-shared",
         "-o", "android/gradle/app/src/main/jniLibs",
-        "build", "--lib"
+        "build", "--locked", "--lib"
     )
 }
 

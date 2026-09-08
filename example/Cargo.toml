@@ -15,7 +15,7 @@ name = "gpui-example"
 path = "src/main.rs"
 
 [dependencies]
-gpui = { package = "gpui", git = "https://github.com/zhu0210/zed.git", rev = "3644f52e78f5371d503888b2cdcd15187e703874", default-features = false }
+gpui = { package = "gpui", git = "https://github.com/zhu0210/zed.git", rev = "f6dfc3025195c1026600fa5a95e14ae3ad64176d", default-features = false }
 gpui-mobile = { path = ".." }
 log = "0.4"
 reqwest = { package = "zed-reqwest", git = "https://github.com/zed-industries/reqwest.git", rev = "33bc764aa15ff7b200bf7c93bd96e24878d53e14", default-features = false, features = [
@@ -27,7 +27,7 @@ reqwest = { package = "zed-reqwest", git = "https://github.com/zed-industries/re
   "socks",
   "stream",
 ] }
-reqwest_client = { git = "https://github.com/zhu0210/zed.git", rev = "3644f52e78f5371d503888b2cdcd15187e703874" }
+reqwest_client = { git = "https://github.com/zhu0210/zed.git", rev = "f6dfc3025195c1026600fa5a95e14ae3ad64176d" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
@@ -51,4 +51,4 @@ panic = "abort"
 codegen-units = 1
 
 [patch."https://github.com/zed-industries/zed"]
-gpui = { version = "=0.2.2", git = "https://github.com/zhu0210/zed.git", rev = "3644f52e78f5371d503888b2cdcd15187e703874" }
+gpui = { version = "=0.2.2", git = "https://github.com/zhu0210/zed.git", rev = "f6dfc3025195c1026600fa5a95e14ae3ad64176d" }
