@@ -1856,8 +1856,17 @@ impl PlatformWindow for AndroidPlatformWindow {
                     return; // ACTION_MULTIPLE or unknown
                 };
 
-                let mut guard = cb.lock();
-                let _ = guard(event);
+                let result = cb.lock()(event);
+
+                // Back reaches GPUI as Escape. When nothing handles it (no screen to
+                // go back to), do what Android does on a root screen: move the task
+                // to the background. Finishing the Activity would end the process.
+                if key_event.key_code == crate::android::keyboard::AKEYCODE_BACK
+                    && key_event.action == AKEY_EVENT_ACTION_DOWN
+                    && result.propagate
+                {
+                    super::jni::move_task_to_back();
+                }
             });
         }
     }

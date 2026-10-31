@@ -1141,6 +1141,25 @@ fn bottom_insets() -> Result<(i32, i32), String> {
     })
 }
 
+/// `activity.moveTaskToBack(true)`: send the app to the background, as Back
+/// does on a root screen.
+pub fn move_task_to_back() {
+    let result = with_env(|env| {
+        let activity_obj = activity(env)?;
+        let moved = env
+            .call_method(
+                &activity_obj,
+                jni::jni_str!("moveTaskToBack"),
+                jni::jni_sig!("(Z)Z"),
+                &[JValue::Bool(true)],
+            )
+            .and_then(|v| v.z());
+        env.exception_clear();
+        moved.e()
+    });
+    log::info!("move_task_to_back: {result:?}");
+}
+
 /// Pause all platform views when the app goes to background.
 fn pause_platform_views() {
     let _ = with_env(|env| {
