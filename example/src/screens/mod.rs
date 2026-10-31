@@ -32,7 +32,7 @@ pub mod webview_browser;
 use crate::demos::{AnimationPlayground, ShaderShowcase};
 use gpui::{
     div, point, prelude::*, px, rgb, size, Bounds, Context, MouseButton, MouseDownEvent,
-    FocusHandle, KeyDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Window,
+    FocusHandle, KeyDownEvent, MouseMoveEvent, ScrollHandle, MouseUpEvent, SharedString, Window,
 };
 use gpui_mobile::components::material::{MaterialTheme, NavigationBarBuilder, TopAppBar};
 use gpui_mobile::{set_system_chrome, StatusBarContentStyle, SystemChromeStyle};
@@ -194,6 +194,8 @@ pub struct Router {
     pub safe_area: SafeArea,
     /// Holds focus when nothing else does, so Back (Escape) reaches the Router.
     focus_handle: Option<FocusHandle>,
+    /// Each screen's scroll position, kept while another screen is shown.
+    scroll_handles: std::collections::HashMap<usize, ScrollHandle>,
 
     // ── Demo view state ──────────────────────────────────────────────────
     /// The animation playground demo (lazily created when the screen is visited).
@@ -236,6 +238,7 @@ impl Router {
             history,
             safe_area,
             focus_handle: None,
+            scroll_handles: Default::default(),
             animation_playground: None,
             shader_showcase: None,
         }
@@ -523,7 +526,13 @@ impl Router {
         };
 
         div()
-            .id("screen-scroll-container")
+            // One id and handle per screen, so each keeps its own scroll position.
+            .id(("screen-scroll-container", self.current_screen as usize))
+            .track_scroll(
+                self.scroll_handles
+                    .entry(self.current_screen as usize)
+                    .or_default(),
+            )
             .flex_1()
             .overflow_y_scroll()
             // Dismiss keyboard when tapping outside text input fields.
