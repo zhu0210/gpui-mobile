@@ -97,13 +97,20 @@ jobs:
         working-directory: example/ios
         run: brew install xcodegen && xcodegen generate --spec project.yml
 
+      - name: Build the Rust library
+        working-directory: example
+        run: |
+          cargo build --lib --target aarch64-apple-ios-sim
+          ls -la target/aarch64-apple-ios-sim/debug/*.a
+
       - name: Build for the simulator
         working-directory: example/ios
         run: |
           xcodebuild -project GpuiExample.xcodeproj -scheme GpuiExample \
             -configuration Debug -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+            -derivedDataPath build ENABLE_USER_SCRIPT_SANDBOXING=NO \
+            CODE_SIGNING_ALLOWED=NO build
 
       - name: Launch on the simulator
         run: |
@@ -155,13 +162,19 @@ jobs:
         working-directory: example/ios
         run: brew install xcodegen && xcodegen generate --spec project.yml
 
+      - name: Build the Rust library
+        working-directory: example
+        run: |
+          cargo build --lib --target aarch64-apple-ios --release
+          ls -la target/aarch64-apple-ios/release/*.a
+
       - name: Build for devices, unsigned
         working-directory: example/ios
         run: |
           xcodebuild -project GpuiExample.xcodeproj -scheme GpuiExample \
             -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
+            -derivedDataPath build ENABLE_USER_SCRIPT_SANDBOXING=NO \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
 
