@@ -544,8 +544,9 @@ impl AndroidPlatform {
     /// Store the finish-launching callback and drive the event loop.
     ///
     /// On Android, `Platform::run` **blocks** until the app quits — matching
-    /// the semantics of macOS / Linux. On the `android-activity` path it never
-    /// returns: the process ends when the Activity is destroyed.  This keeps the `Application` (and its
+    /// the semantics of macOS / Linux. On the `android-activity` path the process
+    /// ends when the Activity finishes; it returns only when the Activity is being
+    /// recreated, and the new Activity then restarts the process.  This keeps the `Application` (and its
     /// internal `Rc<RefCell<AppContext>>`) alive on the caller's stack for the
     /// entire lifetime of the event loop.
     ///
@@ -565,13 +566,17 @@ impl AndroidPlatform {
         // be invoked from inside the event loop when the window is ready.
         if let Some(app) = super::jni::android_app() {
             super::jni::run_event_loop(&app);
-            // The Activity is gone. If Android creates a new one in this process,
-            // `android-activity` calls `android_main` again on a new thread, but GPUI's
-            // `App` and our globals are per process and tied to the first thread
-            // ("must construct App on main thread"). Ending the process makes the next
-            // launch start fresh.
-            log::info!("AndroidPlatform::run — event loop exited, ending the process");
-            std::process::exit(0);
+            // The Activity is gone. GPUI's `App` and our globals are per process and
+            // tied to this thread, so a new Activity can't take them over.
+            if super::jni::activity_finished() {
+                // Ending the process makes the next launch start fresh.
+                log::info!("AndroidPlatform::run — event loop exited, ending the process");
+                std::process::exit(0);
+            }
+            // Being recreated: ending the process now would drop the new Activity
+            // ("app died, no saved state"). Its `android_main` ends the process in
+            // `init_platform` instead, and Android restarts the Activity fresh.
+            log::info!("AndroidPlatform::run — event loop exited, Activity being recreated");
         } else {
             // No `AndroidApp` to drive: either headless / test mode, or the host-driven
             // entry point (`super::host`), whose render thread owns the loop and keeps
