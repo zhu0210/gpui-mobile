@@ -291,6 +291,19 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                         this.navigate_to(Screen::VideoPlayer);
                         cx.notify();
                     }),
+                ))
+                .child(nav_card(
+                    "🎞",
+                    "Video in the Scene",
+                    "Decoded frames drawn by GPUI, no CPU copies",
+                    MAUVE,
+                    card_bg,
+                    text_color,
+                    sub_text,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.navigate_to(Screen::NativeVideo);
+                        cx.notify();
+                    }),
                 )),
         )
 }
