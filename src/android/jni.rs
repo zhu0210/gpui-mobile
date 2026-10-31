@@ -982,10 +982,7 @@ pub fn run_event_loop(app: &AndroidApp) {
                         // Trigger GPUI resize so layout adapts to new dimensions.
                         existing.handle_resize();
 
-                        let cr = app.content_rect();
-                        existing.update_safe_area_from_content_rect(
-                            cr.left, cr.top, cr.right, cr.bottom,
-                        );
+                        refresh_safe_area(&existing, app);
 
                         INIT_WINDOW_DONE.store(true, Ordering::Relaxed);
                     } else {
@@ -997,10 +994,7 @@ pub fn run_event_loop(app: &AndroidApp) {
                                     scale_factor
                                 );
 
-                                let cr = app.content_rect();
-                                win.update_safe_area_from_content_rect(
-                                    cr.left, cr.top, cr.right, cr.bottom,
-                                );
+                                refresh_safe_area(&win, app);
                             }
                             Err(e) => {
                                 log::error!("failed to open window: {e:#}");
@@ -1019,8 +1013,7 @@ pub fn run_event_loop(app: &AndroidApp) {
             if let Some(platform) = PLATFORM.get() {
                 if let Some(win) = platform.primary_window() {
                     win.handle_resize();
-                    let cr = app.content_rect();
-                    win.update_safe_area_from_content_rect(cr.left, cr.top, cr.right, cr.bottom);
+                    refresh_safe_area(&win, app);
                 }
             }
         }
@@ -1132,6 +1125,82 @@ pub fn run_event_loop(app: &AndroidApp) {
     }
 
     log::info!("run_event_loop: exiting main loop");
+}
+
+/// Update the window's safe area and the keyboard height.
+///
+/// With `adjustResize` the content rect also excludes the soft keyboard. iOS
+/// reports the keyboard apart from the safe area, so do the same here: the
+/// keyboard goes to [`crate::set_keyboard_height`] and the bottom inset keeps
+/// only the system bars.
+fn refresh_safe_area(win: &super::window::AndroidWindow, app: &AndroidApp) {
+    let cr = app.content_rect();
+    win.update_safe_area_from_content_rect(cr.left, cr.top, cr.right, cr.bottom);
+    match bottom_insets() {
+        Ok((ime, bars)) => win.set_keyboard_inset(ime, bars),
+        Err(e) => log::debug!("refresh_safe_area: no window insets ({e})"),
+    }
+}
+
+/// `(ime, system bars and cutout)` bottom insets in physical pixels, from
+/// `getRootWindowInsets()` (API 30+).
+fn bottom_insets() -> Result<(i32, i32), String> {
+    // `WindowInsets.Type` constants: systemBars() = 7, ime() = 8, displayCutout() = 128.
+    const SYSTEM_BARS: i32 = 7;
+    const IME: i32 = 8;
+    const DISPLAY_CUTOUT: i32 = 128;
+    with_env(|env| {
+        let result = (|| {
+            let activity_obj = activity(env)?;
+            let window = env
+                .call_method(
+                    &activity_obj,
+                    jni::jni_str!("getWindow"),
+                    jni::jni_sig!("()Landroid/view/Window;"),
+                    &[],
+                )
+                .and_then(|v| v.l())
+                .e()?;
+            let decor = env
+                .call_method(
+                    &window,
+                    jni::jni_str!("getDecorView"),
+                    jni::jni_sig!("()Landroid/view/View;"),
+                    &[],
+                )
+                .and_then(|v| v.l())
+                .e()?;
+            let insets = env
+                .call_method(
+                    &decor,
+                    jni::jni_str!("getRootWindowInsets"),
+                    jni::jni_sig!("()Landroid/view/WindowInsets;"),
+                    &[],
+                )
+                .and_then(|v| v.l())
+                .e()?;
+            if insets.is_null() {
+                return Err("view not attached".into());
+            }
+            let mut bottom = |types: i32| -> Result<i32, String> {
+                let i = env
+                    .call_method(
+                        &insets,
+                        jni::jni_str!("getInsets"),
+                        jni::jni_sig!("(I)Landroid/graphics/Insets;"),
+                        &[JValue::Int(types)],
+                    )
+                    .and_then(|v| v.l())
+                    .e()?;
+                env.get_field(&i, jni::jni_str!("bottom"), jni::jni_sig!("I"))
+                    .and_then(|v| v.i())
+                    .e()
+            };
+            Ok((bottom(IME)?, bottom(SYSTEM_BARS | DISPLAY_CUTOUT)?))
+        })();
+        env.exception_clear();
+        result
+    })
 }
 
 /// Pause all platform views when the app goes to background.
