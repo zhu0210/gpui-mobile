@@ -1,0 +1,180 @@
+name: Mobile smoke tests
+
+# Builds the example app, launches it on an Android emulator and an iOS
+# simulator, and uploads screenshots and logs. Look at the screenshots: a
+# launch that does not crash can still draw nothing.
+
+on:
+  push:
+    branches: [gpui-pre-0.3.10]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  android-emulator:
+    name: Android emulator (API ${{ matrix.api }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [30, 34]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: example
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Build the x86_64 library
+        working-directory: example
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: cargo ndk -t x86_64 -P 26 -o android/gradle/app/src/main/jniLibs build --release
+
+      - name: Assemble the APK
+        working-directory: example/android/gradle
+        run: ./gradlew assembleDebug
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Launch on the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: bash .github/scripts/android-smoke.sh
+
+      - name: Upload screenshot and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-api${{ matrix.api }}-smoke
+          path: smoke/
+          retention-days: 14
+
+  ios-simulator:
+    name: iOS simulator
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: example
+
+      - name: Generate the Xcode project
+        working-directory: example/ios
+        run: brew install xcodegen && xcodegen generate --spec project.yml
+
+      - name: Build for the simulator
+        working-directory: example/ios
+        run: |
+          xcodebuild -project GpuiExample.xcodeproj -scheme GpuiExample \
+            -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+
+      - name: Launch on the simulator
+        run: |
+          set -uo pipefail
+          mkdir -p smoke
+          app=example/ios/build/Build/Products/Debug-iphonesimulator/GpuiExample.app
+          sim=$(xcrun simctl list devices available | grep -m1 "iPhone" | sed -E 's/.*\(([A-F0-9-]+)\).*/\1/')
+          xcrun simctl boot "$sim"
+          xcrun simctl bootstatus "$sim" -b
+          xcrun simctl install "$sim" "$app"
+          xcrun simctl launch "$sim" dev.gpui.mobile.example
+          sleep 20
+          xcrun simctl io "$sim" screenshot smoke/screenshot.png
+          xcrun simctl spawn "$sim" log show --last 3m --style compact \
+            --predicate 'process == "GpuiExample"' > smoke/log.txt || true
+          if ! xcrun simctl spawn "$sim" launchctl list | grep -q dev.gpui.mobile.example; then
+            echo "::error::the example app is not running after launch"
+            tail -40 smoke/log.txt
+            exit 1
+          fi
+
+      - name: Upload screenshot and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-simulator-smoke
+          path: smoke/
+          retention-days: 14
+
+  ios-ipa:
+    name: iOS unsigned IPA
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: example
+
+      - name: Generate the Xcode project
+        working-directory: example/ios
+        run: brew install xcodegen && xcodegen generate --spec project.yml
+
+      - name: Build for devices, unsigned
+        working-directory: example/ios
+        run: |
+          xcodebuild -project GpuiExample.xcodeproj -scheme GpuiExample \
+            -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      # SideStore signs it on the device.
+      - name: Package the IPA
+        run: |
+          mkdir -p ipa/Payload
+          cp -R example/ios/build/Build/Products/Release-iphoneos/GpuiExample.app ipa/Payload/
+          (cd ipa && zip -qr GpuiExample-unsigned.ipa Payload)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: GpuiExample-unsigned.ipa
+          path: ipa/GpuiExample-unsigned.ipa
+          retention-days: 14
