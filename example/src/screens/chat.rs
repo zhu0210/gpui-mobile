@@ -291,11 +291,15 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
         });
 
     let kb_height = gpui_mobile::keyboard_height();
-    // Don't subtract safe_bottom — the chat screen has no bottom safe-area
-    // spacer (it's not a tab-root), and the iOS keyboard height already
-    // includes the safe area. Add a small margin so the composer doesn't
-    // sit flush against the keyboard.
-    let kb_padding = if kb_height > 0.0 { kb_height + 4.0 } else { 0.0 };
+    // The chat screen has no bottom safe-area spacer (it's not a tab-root), so
+    // keep the composer above the keyboard or, without one, above the gesture
+    // bar. The keyboard height already includes the safe area. Add a small
+    // margin so the composer doesn't sit flush against the keyboard.
+    let kb_padding = if kb_height > 0.0 {
+        kb_height + 4.0
+    } else {
+        router.safe_area.bottom
+    };
 
     div()
         .flex()
