@@ -252,10 +252,6 @@ impl Router {
             if let Some(platform) = jni::platform() {
                 if let Some(win) = platform.primary_window() {
                     let insets = win.safe_area_insets_logical();
-                    log::info!(
-                        "Router: safe area insets (logical px): top={:.1} bottom={:.1} left={:.1} right={:.1}",
-                        insets.top, insets.bottom, insets.left, insets.right,
-                    );
                     return SafeArea {
                         top: insets.top,
                         bottom: insets.bottom,
@@ -369,6 +365,8 @@ impl Render for Router {
         let theme = gpui_mobile::components::material::MaterialTheme::from_appearance(self.dark_mode);
         let bg_color = theme.surface;
         let text_color = theme.on_surface;
+        // Insets change with rotation, so read them on every frame.
+        self.safe_area = Self::query_safe_area();
         let safe_top = self.safe_area.top;
         let safe_bottom = self.safe_area.bottom;
 
@@ -384,6 +382,8 @@ impl Render for Router {
             .flex()
             .flex_col()
             .size_full()
+            .pl(px(self.safe_area.left))
+            .pr(px(self.safe_area.right))
             .bg(rgb(bg_color))
             .text_color(rgb(text_color))
             // ── Top safe-area spacer (status bar / notch) ────────────────
