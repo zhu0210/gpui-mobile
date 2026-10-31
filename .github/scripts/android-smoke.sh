@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Installs the example APK on the running emulator, launches it, and saves a
-# screenshot and logcat to smoke/. Fails if the app is not running afterwards.
+# screenshot and logcat to smoke/. Fails if the app is not running afterwards,
+# or if recreating its Activity crashes it.
 set -uo pipefail
 
 APK=example/android/gradle/app/build/outputs/apk/debug/app-debug.apk
@@ -26,5 +27,23 @@ fi
 if grep -q "failed to open window" "$OUT/logcat.txt"; then
   echo "::error::the example app could not open its window"
   grep -E "gpui_wgpu|failed to open window" "$OUT/logcat.txt" | head -20
+  exit 1
+fi
+
+# Recreate the Activity in the running process. The app must restart cleanly
+# instead of panicking ("must construct App on main thread").
+adb logcat -c
+adb shell am start -W --activity-clear-task -n dev.gpui.mobile.example/dev.gpui.mobile.GpuiActivity
+sleep 20
+adb exec-out screencap -p > "$OUT/relaunch-screenshot.png"
+adb logcat -d > "$OUT/relaunch-logcat.txt"
+
+if grep -qE "PANIC|panicked" "$OUT/relaunch-logcat.txt"; then
+  echo "::error::the example app panicked when its Activity was recreated"
+  grep -E "PANIC|panicked" "$OUT/relaunch-logcat.txt" | head -20
+  exit 1
+fi
+if ! adb shell pidof dev.gpui.mobile.example; then
+  echo "::error::the example app is not running after its Activity was recreated"
   exit 1
 fi
