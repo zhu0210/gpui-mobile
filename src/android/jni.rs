@@ -1222,6 +1222,32 @@ pub fn move_task_to_back() {
     log::info!("move_task_to_back: {result:?}");
 }
 
+/// Whether the destroyed Activity was finishing, rather than being recreated
+/// (a configuration or resource change). Set on `MainEvent::Destroy`.
+static ACTIVITY_FINISHING: AtomicBool = AtomicBool::new(true);
+
+/// Whether the Activity's event loop ended because the Activity finished.
+pub fn activity_finished() -> bool {
+    ACTIVITY_FINISHING.load(Ordering::Relaxed)
+}
+
+/// `activity.isFinishing()`, while the Activity is still being destroyed.
+fn activity_is_finishing() -> Result<bool, String> {
+    with_env(|env| {
+        let activity_obj = activity(env)?;
+        let finishing = env
+            .call_method(
+                &activity_obj,
+                jni::jni_str!("isFinishing"),
+                jni::jni_sig!("()Z"),
+                &[],
+            )
+            .and_then(|v| v.z());
+        env.exception_clear();
+        finishing.e()
+    })
+}
+
 /// Pause all platform views when the app goes to background.
 fn pause_platform_views() {
     let _ = with_env(|env| {
@@ -1334,7 +1360,9 @@ fn handle_main_event(_app: &AndroidApp, event: MainEvent<'_>) {
         }
 
         MainEvent::Destroy => {
-            log::info!("MainEvent::Destroy");
+            let finishing = activity_is_finishing();
+            log::info!("MainEvent::Destroy (finishing: {finishing:?})");
+            ACTIVITY_FINISHING.store(finishing.unwrap_or(true), Ordering::Relaxed);
 
             if let Some(platform) = PLATFORM.get() {
                 platform.quit();
