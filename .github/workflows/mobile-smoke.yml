@@ -45,9 +45,7 @@ jobs:
 
       - name: Build the x86_64 library
         working-directory: example
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
-        run: cargo ndk -t x86_64 -P 26 -o android/gradle/app/src/main/jniLibs build --release
+        run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo ndk -t x86_64 -P 26 -o android/gradle/app/src/main/jniLibs build --release
 
       - name: Assemble the APK
         working-directory: example/android/gradle
@@ -78,7 +76,7 @@ jobs:
 
   ios-simulator:
     name: iOS simulator
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
 
@@ -136,7 +134,7 @@ jobs:
 
   ios-ipa:
     name: iOS unsigned IPA
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
 
