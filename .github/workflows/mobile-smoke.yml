@@ -126,7 +126,10 @@ jobs:
           xcrun simctl io "$sim" screenshot smoke/screenshot.png
           xcrun simctl spawn "$sim" log show --last 3m --style compact \
             --predicate 'process == "GpuiExample"' > smoke/log.txt || true
-          if ! xcrun simctl spawn "$sim" launchctl list | grep -q dev.gpui.mobile.example; then
+          # Capture first: `grep -q` exits early, and with pipefail the SIGPIPE it
+          # leaves `launchctl` fails the check while the app is running.
+          services=$(xcrun simctl spawn "$sim" launchctl list)
+          if ! grep -q dev.gpui.mobile.example <<<"$services"; then
             echo "::error::the example app is not running after launch"
             tail -40 smoke/log.txt
             exit 1
