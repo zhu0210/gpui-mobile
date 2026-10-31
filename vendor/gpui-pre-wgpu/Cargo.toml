@@ -142,6 +142,9 @@ default-features = false
 [dependencies.unicode-segmentation]
 version = "1.10"
 
+[target.'cfg(target_os = "android")'.dependencies.ash]
+version = "0.38"
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
 version = "30.0.1"
 features = [

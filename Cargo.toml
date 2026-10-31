@@ -51,6 +51,9 @@ media_session = []
 # Render GPUI windows into images (`gpui_mobile::offscreen`). Needs the vendored
 # `gpui-pre-wgpu` (see `[patch.crates-io]`), which exposes its headless renderer.
 offscreen = ["gpui_wgpu/offscreen", "dep:image"]
+# Video frames decoded by the platform and drawn in the GPUI scene without CPU
+# copies (`gpui_mobile::media`). Needs the vendored `gpui-pre-wgpu` too.
+media = []
 
 [lib]
 name = "gpui_mobile"
@@ -111,7 +114,9 @@ libc        = "0.2"
 # fails to `dlopen` on older Android versions before our own code runs.
 ndk         = { version = "0.9", features = ["nativewindow"] }
 ndk-context = "0.1"
-ndk-sys     = "0.6"
+ndk-sys     = { version = "0.6", features = ["media"] }
+# Raw Vulkan for importing AHardwareBuffers (`media`); the version wgpu-hal uses.
+ash         = "0.38"
 
 # Activity glue layer
 android-activity = { version = "0.6", features = ["native-activity"] }
