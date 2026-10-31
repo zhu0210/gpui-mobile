@@ -1364,6 +1364,17 @@ pub fn install_panic_hook() {
 /// can register callbacks (e.g. `set_on_init_window`) before entering
 /// the event loop.
 pub fn init_platform(app: &AndroidApp) -> &'static Arc<AndroidPlatform> {
+    // A second `android_main` in this process: Android created a new Activity
+    // (e.g. `FLAG_ACTIVITY_CLEAR_TASK`, or a configuration change not listed in
+    // `configChanges`) while GPUI still runs on the first one's thread. GPUI's
+    // `App` can't move threads and `ANDROID_APP` can't be replaced, so end the
+    // process instead of panicking; the next launch starts fresh. Hosts that
+    // must survive recreation use the host-driven path (`super::host`).
+    if PLATFORM.get().is_some() {
+        log::warn!("init_platform: second Activity in a live process — ending the process");
+        std::process::exit(0);
+    }
+
     let _ = ANDROID_APP.set(app.clone());
     log::info!("init_platform: stored AndroidApp");
 
