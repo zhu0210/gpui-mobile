@@ -32,7 +32,7 @@ pub mod webview_browser;
 use crate::demos::{AnimationPlayground, ShaderShowcase};
 use gpui::{
     div, point, prelude::*, px, rgb, size, Bounds, Context, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, Window,
+    FocusHandle, KeyDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Window,
 };
 use gpui_mobile::components::material::{MaterialTheme, NavigationBarBuilder, TopAppBar};
 use gpui_mobile::{set_system_chrome, StatusBarContentStyle, SystemChromeStyle};
@@ -192,6 +192,8 @@ pub struct Router {
     history: Vec<Screen>,
     /// Safe area insets (logical pixels) to pad around system chrome.
     pub safe_area: SafeArea,
+    /// Holds focus when nothing else does, so Back (Escape) reaches the Router.
+    focus_handle: Option<FocusHandle>,
 
     // ── Demo view state ──────────────────────────────────────────────────
     /// The animation playground demo (lazily created when the screen is visited).
@@ -233,6 +235,7 @@ impl Router {
             dark_mode: true,
             history,
             safe_area,
+            focus_handle: None,
             animation_playground: None,
             shader_showcase: None,
         }
@@ -365,6 +368,10 @@ impl Render for Router {
         let theme = gpui_mobile::components::material::MaterialTheme::from_appearance(self.dark_mode);
         let bg_color = theme.surface;
         let text_color = theme.on_surface;
+        let focus_handle = self.focus_handle.get_or_insert_with(|| cx.focus_handle()).clone();
+        if window.focused(cx).is_none() {
+            focus_handle.focus(window, cx);
+        }
         // Insets change with rotation, so read them on every frame.
         self.safe_area = Self::query_safe_area();
         let safe_top = self.safe_area.top;
@@ -382,8 +389,17 @@ impl Render for Router {
             .flex()
             .flex_col()
             .size_full()
+            .track_focus(&focus_handle)
             .pl(px(self.safe_area.left))
             .pr(px(self.safe_area.right))
+            // Android's Back arrives as Escape. Leave it unhandled on a root screen
+            // so the platform sends the app to the background.
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "escape" && this.go_back() {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .bg(rgb(bg_color))
             .text_color(rgb(text_color))
             // ── Top safe-area spacer (status bar / notch) ────────────────
