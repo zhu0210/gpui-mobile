@@ -345,8 +345,10 @@ loads Roboto and other system fonts from `/system/fonts/` during
 
 ### App crashes on rotation
 
-The manifest includes `android:configChanges="orientation|screenSize|..."` to
-prevent the activity from being recreated.  Verify the manifest wasn't changed.
+The manifest lists every configuration change in `android:configChanges`
+(`mcc|mnc|locale|...|orientation|screenSize|...`) so the activity is never
+recreated.  Verify the manifest wasn't changed; a missing entry restarts the
+app when that configuration changes.
 
 ### APK is huge (300+ MB)
 
