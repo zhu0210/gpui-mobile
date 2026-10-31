@@ -1122,6 +1122,23 @@ impl AndroidWindow {
         state.safe_area_insets = insets;
     }
 
+    /// Move the soft keyboard out of the bottom safe-area inset.
+    ///
+    /// `ime_bottom` and `bars_bottom` are physical pixels from the window's
+    /// insets. The keyboard height (logical pixels, including the system bars
+    /// it covers, as on iOS) goes to [`crate::set_keyboard_height`].
+    pub fn set_keyboard_inset(&self, ime_bottom: i32, bars_bottom: i32) {
+        let scale = {
+            let mut state = self.state.lock();
+            if ime_bottom > 0 {
+                log::info!("keyboard inset: {ime_bottom}, bottom safe area now {bars_bottom} (physical px)");
+                state.safe_area_insets.bottom = bars_bottom as f32;
+            }
+            state.scale_factor
+        };
+        crate::set_keyboard_height(ime_bottom.max(0) as f32 / scale);
+    }
+
     // ── state queries ─────────────────────────────────────────────────────────
 
     /// Whether the window currently has an active wgpu surface.
