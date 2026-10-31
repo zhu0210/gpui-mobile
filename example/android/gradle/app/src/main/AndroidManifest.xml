@@ -12,9 +12,11 @@
     - The `android.app.lib_name` meta-data tells NativeActivity which .so
       to dlopen.  It must match the cdylib / example output name WITHOUT
       the `lib` prefix or `.so` suffix.
-    - `configChanges` prevents the activity from being recreated on common
-      configuration changes (rotation, keyboard, screen size).  The Rust
-      code handles these via NDK callbacks instead.
+    - `configChanges` lists every configuration change, so the activity is
+      never recreated (rotation, keyboard, locale, font scale, and the SIM
+      registering, which changes mcc/mnc).  The Rust code handles these via
+      NDK callbacks instead.  GPUI cannot move to a new Activity's thread, so
+      a recreation restarts the process and loses the app's state.
     - Hardware acceleration is enabled for Vulkan / GPU compositing.
     - The theme hides the title bar and status bar for a fullscreen
       immersive experience.
@@ -99,7 +101,7 @@
         -->
         <activity
             android:name="dev.gpui.mobile.GpuiActivity"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density"
+            android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|density|screenSize|smallestScreenSize|layoutDirection|colorMode|fontWeightAdjustment|grammaticalGender"
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="unspecified"
