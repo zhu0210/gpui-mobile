@@ -22,7 +22,7 @@ use gpui::{
     PromptButton, PromptLevel, RequestFrameOptions, Scene, Size, TileId, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams, WindowVisibility,
 };
-use gpui_wgpu::{GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig};
+use gpui_wgpu::{wgpu, GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig};
 use objc2::encode::{Encode, Encoding, RefEncode};
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{class, msg_send, sel};
