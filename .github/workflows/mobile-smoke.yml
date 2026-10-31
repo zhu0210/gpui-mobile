@@ -23,7 +23,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        api: [30, 34]
+        # API 30 images have no Vulkan, and gpui-pre-wgpu cannot render on GLES 3.0.
+        api: [34]
     steps:
       - uses: actions/checkout@v6
 

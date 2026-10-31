@@ -21,3 +21,10 @@ if ! adb shell pidof dev.gpui.mobile.example; then
   grep -E "signal [0-9]+|panicked|#0[0-9] pc" "$OUT/logcat.txt" | head -20
   exit 1
 fi
+
+# The process stays alive when no renderer can be built, showing only the splash.
+if grep -q "failed to open window" "$OUT/logcat.txt"; then
+  echo "::error::the example app could not open its window"
+  grep -E "gpui_wgpu|failed to open window" "$OUT/logcat.txt" | head -20
+  exit 1
+fi

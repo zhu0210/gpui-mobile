@@ -92,7 +92,6 @@ libc = "=0.2.189"
 
 # wgpu renderer (Metal backend on iOS/Android)
 gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.10", features = ["font-kit"] }
-wgpu = "30.0.1"
 
 # Text / font stack
 pathfinder_geometry = "0.5"
