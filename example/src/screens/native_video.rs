@@ -9,17 +9,25 @@ use gpui_mobile::media::VideoFrames;
 
 use super::{BLUE, GREEN, SUBTEXT, SURFACE0, TEXT};
 
-/// The sample clips: name, file name and contents.
-const CLIPS: [(&str, &str, &[u8]); 2] = [
+enum Clip {
+    /// A bundled file: its name and contents.
+    Bundled(&'static str, &'static [u8]),
+    Stream(&'static str),
+}
+
+/// The sample clips, by button label.
+const CLIPS: [(&str, Clip); 3] = [
     (
         "60 s with audio",
-        "av-60s-640x360.mp4",
-        include_bytes!("../../assets/video/av-60s-640x360.mp4"),
+        Clip::Bundled("av-60s-640x360.mp4", include_bytes!("../../assets/video/av-60s-640x360.mp4")),
     ),
     (
         "Rotated 90°",
-        "rotated-90.mp4",
-        include_bytes!("../../assets/video/rotated-90.mp4"),
+        Clip::Bundled("rotated-90.mp4", include_bytes!("../../assets/video/rotated-90.mp4")),
+    ),
+    (
+        "Stream",
+        Clip::Stream("https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"),
     ),
 ];
 
@@ -37,11 +45,15 @@ thread_local! {
 }
 
 fn open_clip(index: usize) -> Result<VideoFrames, String> {
-    let (_, name, bytes) = CLIPS[index];
-    let directory = gpui_mobile::packages::path_provider::cache_directory()?;
-    let path = directory.join(name);
-    std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
-    let video = VideoFrames::open(&path).map_err(|error| format!("{error:#}"))?;
+    let video = match CLIPS[index].1 {
+        Clip::Bundled(name, bytes) => {
+            let path = gpui_mobile::packages::path_provider::cache_directory()?.join(name);
+            std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+            VideoFrames::open(&path)
+        }
+        Clip::Stream(url) => VideoFrames::open_url(url),
+    }
+    .map_err(|error| format!("{error:#}"))?;
     video.set_looping(true);
     Ok(video)
 }
@@ -111,7 +123,7 @@ pub fn render(_cx: &App) -> AnyElement {
         16.0 / 9.0
     };
 
-    let clip_buttons = CLIPS.iter().enumerate().map(|(index, (name, _, _))| {
+    let clip_buttons = CLIPS.iter().enumerate().map(|(index, (name, _))| {
         button(*name, if index == clip { GREEN } else { SUBTEXT }, move |_, window, _| {
             CLIP.with(|clip| clip.set(index));
             reset_state();

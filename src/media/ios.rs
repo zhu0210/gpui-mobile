@@ -15,7 +15,7 @@ use objc2::{class, msg_send};
 use objc2_metal::{MTLTexture, MTLTextureType};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
-use std::path::Path;
+use super::Source;
 use std::ptr;
 use std::time::{Duration, Instant};
 
@@ -26,11 +26,15 @@ const MTL_PIXEL_FORMAT_BGRA8: usize = 80;
 /// `AVPlayerActionAtItemEnd`.
 const ACTION_PAUSE: isize = 1;
 const ACTION_NONE: isize = 2;
+/// `AVPlayerItemStatusReadyToPlay`.
+const ITEM_READY: isize = 1;
 
 pub(super) struct Decoder {
     player: *mut AnyObject,
     output: *mut AnyObject,
-    duration_us: i64,
+    /// Whether the track's transform has been looked at (once the item is
+    /// ready, so a stream's tracks are known without blocking).
+    transform_checked: Cell<bool>,
     looping: Cell<bool>,
     size: Cell<Size<DevicePixels>>,
     /// The texture cache, with the `MTLDevice` it was made for.
@@ -40,33 +44,24 @@ pub(super) struct Decoder {
 }
 
 impl Decoder {
-    pub fn open(path: &Path) -> Result<Self> {
-        let path = path.to_str().ok_or_else(|| anyhow!("non-UTF-8 path {path:?}"))?;
+    pub fn open(source: Source) -> Result<Self> {
         // SAFETY: called on the main thread, which has an autorelease pool;
         // the objects kept are retained here and released in `drop`.
         unsafe {
-            let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: crate::ios::util::nsstring(path)];
+            let url: *mut AnyObject = match source {
+                Source::File(path) => {
+                    let path = path.to_str().ok_or_else(|| anyhow!("non-UTF-8 path {path:?}"))?;
+                    msg_send![class!(NSURL), fileURLWithPath: crate::ios::util::nsstring(path)]
+                }
+                Source::Url(url) => msg_send![class!(NSURL), URLWithString: crate::ios::util::nsstring(url)],
+            };
+            if url.is_null() {
+                bail!("not a URL: {source:?}");
+            }
             let item: *mut AnyObject = msg_send![class!(AVPlayerItem), playerItemWithURL: url];
             if item.is_null() {
-                bail!("AVPlayerItem for {path} failed");
+                bail!("AVPlayerItem for {source:?} failed");
             }
-            let asset: *mut AnyObject = msg_send![item, asset];
-            let duration: CMTime = msg_send![asset, duration];
-            // The output hands out frames as stored. A composition built from
-            // the asset turns them by the track's transform, at the cost of
-            // one extra GPU pass, so only rotated tracks get one.
-            let tracks: *mut AnyObject = msg_send![asset, tracksWithMediaType: AVMediaTypeVideo];
-            let track: *mut AnyObject = msg_send![tracks, firstObject];
-            if !track.is_null() {
-                let transform: CGAffineTransform = msg_send![track, preferredTransform];
-                if (transform.a, transform.b, transform.c, transform.d) != (1.0, 0.0, 0.0, 1.0) {
-                    let composition: *mut AnyObject =
-                        msg_send![class!(AVVideoComposition), videoCompositionWithPropertiesOfAsset: asset];
-                    let _: () = msg_send![item, setVideoComposition: composition];
-                    log::info!("video: track turned by {:.0}°", transform.b.atan2(transform.a).to_degrees());
-                }
-            }
-
             let keys = [kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferMetalCompatibilityKey];
             let values: [*mut AnyObject; 2] = [
                 msg_send![class!(NSNumber), numberWithUnsignedInt: PIXEL_FORMAT_BGRA],
@@ -92,11 +87,11 @@ impl Decoder {
             let player: *mut AnyObject = msg_send![player, retain];
             let _: () = msg_send![player, setActionAtItemEnd: ACTION_PAUSE];
             let _: () = msg_send![player, play];
-            log::info!("video: playing {path} through AVPlayer");
+            log::info!("video: playing {source:?} through AVPlayer");
             Ok(Self {
                 player,
                 output,
-                duration_us: duration.micros(),
+                transform_checked: Cell::new(false),
                 looping: Cell::new(false),
                 size: Cell::new(Size::default()),
                 cache: RefCell::new(None),
@@ -135,7 +130,11 @@ impl Decoder {
     }
 
     pub fn seek(&self, position: Duration) {
-        let time = CMTime::from_micros((position.as_micros() as i64).clamp(0, self.duration_us));
+        let mut micros = position.as_micros() as i64;
+        if self.duration_us() > 0 {
+            micros = micros.min(self.duration_us());
+        }
+        let time = CMTime::from_micros(micros);
         let zero = CMTime::from_micros(0);
         // SAFETY: a live player, on the main thread.
         unsafe { msg_send![self.player, seekToTime: time, toleranceBefore: zero, toleranceAfter: zero] }
@@ -149,6 +148,18 @@ impl Decoder {
         unsafe { msg_send![self.player, setActionAtItemEnd: action] }
     }
 
+    fn item(&self) -> *mut AnyObject {
+        // SAFETY: a live player, on the main thread; the item stays current.
+        unsafe { msg_send![self.player, currentItem] }
+    }
+
+    /// The item's duration, 0 while a stream is still loading.
+    fn duration_us(&self) -> i64 {
+        // SAFETY: a live item, on the main thread.
+        let duration: CMTime = unsafe { msg_send![self.item(), duration] };
+        duration.micros()
+    }
+
     fn position_us(&self) -> i64 {
         // SAFETY: a live player, on the main thread.
         let time: CMTime = unsafe { msg_send![self.player, currentTime] };
@@ -156,15 +167,22 @@ impl Decoder {
     }
 
     pub fn position(&self) -> Duration {
-        Duration::from_micros(self.position_us().clamp(0, self.duration_us) as u64)
+        let position = self.position_us().max(0);
+        let duration = self.duration_us();
+        Duration::from_micros(if duration > 0 { position.min(duration) } else { position } as u64)
     }
 
     pub fn duration(&self) -> Duration {
-        Duration::from_micros(self.duration_us as u64)
+        Duration::from_micros(self.duration_us() as u64)
+    }
+
+    fn at_end(&self) -> bool {
+        let duration = self.duration_us();
+        duration > 0 && self.position_us() >= duration
     }
 
     pub fn ended(&self) -> bool {
-        !self.looping.get() && self.position_us() >= self.duration_us
+        !self.looping.get() && self.at_end()
     }
 
     pub fn is_active(&self) -> bool {
@@ -178,8 +196,11 @@ impl Decoder {
     /// Imports the frame due now, if the output has a new one, and makes it
     /// the texture drawn for `image_id`.
     pub fn update(&self, image_id: ImageId) -> Result<()> {
-        if self.looping.get() && self.position_us() >= self.duration_us {
+        if self.looping.get() && self.at_end() {
             self.seek(Duration::ZERO);
+        }
+        if !self.transform_checked.get() {
+            self.check_transform();
         }
         // SAFETY: a live output, on the main thread; the copied buffer is
         // owned (+1) and released by `CFRef`.
@@ -216,6 +237,35 @@ impl Decoder {
             );
         }
         Ok(())
+    }
+
+    /// The output hands out frames as stored. A composition built from the
+    /// asset turns them by the track's transform, at the cost of one extra
+    /// GPU pass, so only rotated tracks get one.
+    fn check_transform(&self) {
+        // SAFETY: a live item, on the main thread. Once the item is ready to
+        // play its asset's tracks are loaded, so asking for them won't block.
+        unsafe {
+            let item = self.item();
+            let status: isize = msg_send![item, status];
+            if status != ITEM_READY {
+                return;
+            }
+            self.transform_checked.set(true);
+            let asset: *mut AnyObject = msg_send![item, asset];
+            let tracks: *mut AnyObject = msg_send![asset, tracksWithMediaType: AVMediaTypeVideo];
+            let track: *mut AnyObject = msg_send![tracks, firstObject];
+            if track.is_null() {
+                return;
+            }
+            let transform: CGAffineTransform = msg_send![track, preferredTransform];
+            if (transform.a, transform.b, transform.c, transform.d) != (1.0, 0.0, 0.0, 1.0) {
+                let composition: *mut AnyObject =
+                    msg_send![class!(AVVideoComposition), videoCompositionWithPropertiesOfAsset: asset];
+                let _: () = msg_send![item, setVideoComposition: composition];
+                log::info!("video: track turned by {:.0}°", transform.b.atan2(transform.a).to_degrees());
+            }
+        }
     }
 
     fn import(&self, buffer: CFRef, device: &wgpu::Device) -> Result<wgpu::Texture> {
