@@ -85,8 +85,11 @@ final class GPUIContainerController: UIViewController {
 
         // Full screen: the menu pads itself by the view's safe-area insets.
         // Without the bottom safe area the keyboard guide ends at the screen
-        // edge while the keyboard is hidden.
-        view.keyboardLayoutGuide.usesBottomSafeArea = false
+        // edge while the keyboard is hidden (iOS 17; on 16 the menu pads for
+        // the home indicator twice).
+        if #available(iOS 17.0, *) {
+            view.keyboardLayoutGuide.usesBottomSafeArea = false
+        }
         NSLayoutConstraint.activate([
             gpuiView.topAnchor.constraint(equalTo: view.topAnchor),
             gpuiView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
