@@ -1319,6 +1319,27 @@ impl IosWindow {
         }
     }
 
+    /// How much of the view the keyboard covers. A host that ends the view at
+    /// the keyboard (`keyboardLayoutGuide`) has none covered; a full-screen view
+    /// has the keyboard's whole height. The keyboard docks at the window's bottom.
+    fn keyboard_overlap(&self) -> f32 {
+        let keyboard = crate::keyboard_height();
+        if keyboard <= 0.0 {
+            return 0.0;
+        }
+        unsafe {
+            let window: *mut AnyObject = msg_send![self.view, window];
+            if window.is_null() {
+                return keyboard;
+            }
+            let bounds: ObjcCGRect = msg_send![self.view, bounds];
+            let in_window: ObjcCGRect = msg_send![self.view, convertRect: bounds, toView: std::ptr::null_mut::<AnyObject>()];
+            let window_bounds: ObjcCGRect = msg_send![window, bounds];
+            let keyboard_top = window_bounds.height - f64::from(keyboard);
+            ((in_window.y + in_window.height - keyboard_top).max(0.0) as f32).min(keyboard)
+        }
+    }
+
     fn notify_resize(&self, size: Size<Pixels>, scale: f32) {
         let cb = self.resize_callback.borrow_mut().take();
         if let Some(mut cb) = cb {
@@ -1373,7 +1394,7 @@ impl PlatformWindow for IosWindow {
         let size = self.bounds.get().size;
         Size {
             width: size.width,
-            height: (size.height - px(crate::keyboard_height())).max(px(0.0)),
+            height: (size.height - px(self.keyboard_overlap())).max(px(0.0)),
         }
     }
 
