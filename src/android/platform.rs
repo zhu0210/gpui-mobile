@@ -571,7 +571,7 @@ impl AndroidPlatform {
             if super::jni::activity_finished() {
                 // Ending the process makes the next launch start fresh.
                 log::info!("AndroidPlatform::run — event loop exited, ending the process");
-                std::process::exit(0);
+                super::jni::end_process();
             }
             // Being recreated: ending the process now would drop the new Activity
             // ("app died, no saved state"). Its `android_main` ends the process in
