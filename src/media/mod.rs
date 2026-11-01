@@ -15,7 +15,9 @@
 //!   each frame's `AHardwareBuffer` is imported into Vulkan and converted from
 //!   YCbCr to RGBA by one render pass. Audio plays through AAudio and drives
 //!   the clock the frames follow.
-//! - iOS: not yet (IOSurface import, see the media track in `PLAN.md`).
+//! - iOS: `AVPlayer` plays the file; an `AVPlayerItemVideoOutput` hands out
+//!   IOSurface-backed BGRA pixel buffers, wrapped as Metal textures through
+//!   `CVMetalTextureCache`.
 //!
 //! Feature-gated behind `media`.
 
@@ -23,6 +25,10 @@
 mod android;
 #[cfg(target_os = "android")]
 use android::Decoder;
+#[cfg(target_os = "ios")]
+mod ios;
+#[cfg(target_os = "ios")]
+use ios::Decoder;
 
 use gpui::{px, size, Bounds, Corners, DevicePixels, Pixels, RenderImage, Size, Window};
 use std::path::Path;
@@ -118,7 +124,7 @@ impl VideoFrames {
 
 impl Drop for VideoFrames {
     fn drop(&mut self) {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         gpui_wgpu::remove_external_texture(self.image.id);
     }
 }
@@ -163,14 +169,14 @@ fn uv_mapping(crop: (i32, i32, u32, u32), buffer: (u32, u32), rotation: i32) -> 
 
 /// Where no decoder exists yet: [`VideoFrames::open`] fails, so no value of
 /// this type is ever made.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 enum Decoder {}
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[allow(clippy::unused_self)]
 impl Decoder {
     fn open(_path: &Path) -> anyhow::Result<Self> {
-        anyhow::bail!("video frames are only implemented on Android")
+        anyhow::bail!("video frames are only implemented on Android and iOS")
     }
     fn video_size(&self) -> Size<DevicePixels> {
         match *self {}

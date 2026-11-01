@@ -86,6 +86,8 @@ core-graphics       = "0.24"
 core-text           = "=21.0.0"
 uuid                = { version = "1", features = ["v4", "v5"] }
 block2              = "0.6"
+# Wrapping IOSurface-backed video frames for wgpu (`media`); the version wgpu-hal uses.
+objc2-metal         = "0.3"
 
 # libc 0.2.190 dropped the iOS `_dyld_*` symbol declarations that `backtrace`
 # calls in `symbolize/gimli/libs_macos.rs`, which breaks `cargo check` for the
