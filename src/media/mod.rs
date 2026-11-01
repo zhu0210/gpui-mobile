@@ -18,6 +18,11 @@
 //! - iOS: `AVPlayer` plays the file; an `AVPlayerItemVideoOutput` hands out
 //!   IOSurface-backed BGRA pixel buffers, wrapped as Metal textures through
 //!   `CVMetalTextureCache`.
+//! - FFmpeg ([`Source::Ffmpeg`], feature `ffmpeg`, Android for now): FFmpeg
+//!   demuxes; video decodes through FFmpeg's MediaCodec decoders into the same
+//!   reader and import, or in software with the planes uploaded and converted
+//!   on the GPU ([`Source::FfmpegSoftware`] forces that); audio decodes in
+//!   software into AAudio.
 //!
 //! Feature-gated behind `media`.
 
@@ -29,6 +34,10 @@ use android::Decoder;
 mod ios;
 #[cfg(target_os = "ios")]
 use ios::Decoder;
+#[cfg(all(feature = "ffmpeg", target_os = "android"))]
+mod ffmpeg;
+#[cfg(all(feature = "ffmpeg", target_os = "android"))]
+mod planes;
 
 use gpui::{px, size, Bounds, Corners, DevicePixels, Pixels, RenderImage, Size, Window};
 use std::path::Path;
@@ -45,10 +54,37 @@ pub struct VideoFrames {
     inner: Decoder,
 }
 
+/// What decodes the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Source {
+    /// The platform's player: `AMediaExtractor` + `AMediaCodec`, `AVPlayer`.
+    #[default]
+    Platform,
+    /// FFmpeg, decoding in hardware through the platform decoder when it takes
+    /// the stream, in software otherwise.
+    #[cfg(feature = "ffmpeg")]
+    Ffmpeg,
+    /// FFmpeg, always decoding in software.
+    #[cfg(feature = "ffmpeg")]
+    FfmpegSoftware,
+}
+
 impl VideoFrames {
-    /// Opens a local video file and starts playing it.
+    /// Opens a local video file and starts playing it with the platform's player.
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let inner = Decoder::open(path.as_ref())?;
+        Self::open_with(path, Source::Platform)
+    }
+
+    /// Opens a local video file and starts playing it, decoded by `source`.
+    pub fn open_with(path: impl AsRef<Path>, source: Source) -> anyhow::Result<Self> {
+        #[cfg(target_os = "android")]
+        let inner = Decoder::open(path.as_ref(), source)?;
+        #[cfg(not(target_os = "android"))]
+        let inner = match source {
+            Source::Platform => Decoder::open(path.as_ref())?,
+            #[allow(unreachable_patterns)]
+            _ => anyhow::bail!("{source:?} is not implemented on this platform yet"),
+        };
         // Drawn by the atlas only while no frame is registered (before the
         // first frame, or after a device loss until the next one).
         let placeholder = image::Frame::new(image::RgbaImage::new(1, 1));
@@ -167,6 +203,38 @@ fn uv_mapping(crop: (i32, i32, u32, u32), buffer: (u32, u32), rotation: i32) -> 
     ]
 }
 
+/// The YCbCr → RGB conversion for 8-bit video, as the planes shader takes
+/// it: (Y offset, Y scale, chroma offset, chroma scale), then the R, G and B
+/// rows applied to (Y, Cb, Cr, 0). BT.709 or BT.601, limited or full range.
+#[cfg_attr(not(all(feature = "ffmpeg", target_os = "android")), allow(dead_code))]
+fn yuv_to_rgb(bt709: bool, full_range: bool) -> [f32; 16] {
+    let (kr, kb) = if bt709 { (0.2126, 0.0722) } else { (0.299, 0.114) };
+    let kg = 1.0 - kr - kb;
+    let range = if full_range {
+        [0.0, 1.0, 128.0 / 255.0, 1.0]
+    } else {
+        [16.0 / 255.0, 255.0 / 219.0, 128.0 / 255.0, 255.0 / 224.0]
+    };
+    [
+        range[0],
+        range[1],
+        range[2],
+        range[3],
+        1.0,
+        0.0,
+        2.0 - 2.0 * kr,
+        0.0,
+        1.0,
+        -(2.0 - 2.0 * kb) * kb / kg,
+        -(2.0 - 2.0 * kr) * kr / kg,
+        0.0,
+        1.0,
+        2.0 - 2.0 * kb,
+        0.0,
+        0.0,
+    ]
+}
+
 /// Where no decoder exists yet: [`VideoFrames::open`] fails, so no value of
 /// this type is ever made.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -240,6 +308,24 @@ mod tests {
             (mapped.0 - x).abs() < 1e-6 && (mapped.1 - y).abs() < 1e-6,
             "({u}, {v}) maps to {mapped:?}, not ({x}, {y})"
         );
+    }
+
+    /// Converts 8-bit (Y, Cb, Cr) the way the planes shader does.
+    fn convert(m: [f32; 16], (y, cb, cr): (f32, f32, f32)) -> [f32; 3] {
+        let y = (y / 255.0 - m[0]) * m[1];
+        let (cb, cr) = ((cb / 255.0 - m[2]) * m[3], (cr / 255.0 - m[2]) * m[3]);
+        [4, 8, 12].map(|row| (m[row] * y + m[row + 1] * cb + m[row + 2] * cr).clamp(0.0, 1.0))
+    }
+
+    #[test]
+    fn yuv_to_rgb_matches_reference_colours() {
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.01);
+        // Limited-range black and white.
+        assert!(close(convert(yuv_to_rgb(true, false), (16., 128., 128.)), [0., 0., 0.]));
+        assert!(close(convert(yuv_to_rgb(false, false), (235., 128., 128.)), [1., 1., 1.]));
+        // BT.709 limited red (63, 102, 240) and BT.601 full-range green (150, 44, 21).
+        assert!(close(convert(yuv_to_rgb(true, false), (63., 102., 240.)), [1., 0., 0.]));
+        assert!(close(convert(yuv_to_rgb(false, true), (150., 44., 21.)), [0., 1., 0.]));
     }
 
     #[test]
