@@ -27,7 +27,6 @@ pub mod native_video;
 pub mod packages_demo;
 pub mod settings;
 pub mod swiper;
-pub mod video_player;
 pub mod webview_browser;
 
 use crate::demos::{AnimationPlayground, ShaderShowcase};
@@ -59,7 +58,6 @@ pub enum Screen {
     Feed,
     Chat,
     AudioPlayer,
-    VideoPlayer,
     NativeVideo,
     Markdown,
 }
@@ -99,8 +97,7 @@ impl Screen {
             "feed" => Some(Screen::Feed),
             "chat" => Some(Screen::Chat),
             "audio_player" | "audio" => Some(Screen::AudioPlayer),
-            "video_player" | "video" => Some(Screen::VideoPlayer),
-            "native_video" => Some(Screen::NativeVideo),
+            "native_video" | "video_player" | "video" => Some(Screen::NativeVideo),
             _ => None,
         }
     }
@@ -124,7 +121,6 @@ impl Screen {
             Screen::Feed => "Feed",
             Screen::Chat => "Sarah Johnson",
             Screen::AudioPlayer => "Audio Player",
-            Screen::VideoPlayer => "Video Player",
             Screen::NativeVideo => "Video in the Scene",
         }
     }
@@ -298,10 +294,6 @@ impl Router {
             if self.current_screen == Screen::WebViewBrowser {
                 webview_browser::dismiss_webview();
             }
-            // Dismiss video surface when leaving video player
-            if self.current_screen == Screen::VideoPlayer {
-                video_player::dismiss();
-            }
             // Pause audio when leaving audio player
             if self.current_screen == Screen::AudioPlayer {
                 audio_player::dismiss();
@@ -340,10 +332,6 @@ impl Router {
             // Dismiss webview when leaving browser
             if self.current_screen == Screen::WebViewBrowser {
                 webview_browser::dismiss_webview();
-            }
-            // Dismiss video surface when leaving video player
-            if self.current_screen == Screen::VideoPlayer {
-                video_player::dismiss();
             }
             // Pause audio when leaving audio player
             if self.current_screen == Screen::AudioPlayer {
@@ -528,11 +516,6 @@ impl Router {
             Screen::Feed => self.render_feed_screen(cx).into_any_element(),
             Screen::Chat => self.render_chat_screen(cx).into_any_element(),
             Screen::AudioPlayer => self.render_audio_player_screen(cx).into_any_element(),
-            Screen::VideoPlayer => {
-                // Video player has its own layout with fixed video area + scrollable controls.
-                // Rendered directly in render_current_screen to bypass the scroll wrapper.
-                return self.render_video_player_screen(window, cx).into_any_element();
-            }
             Screen::Animations | Screen::Shaders => unreachable!(),
         };
 
@@ -667,10 +650,6 @@ impl Router {
 
     fn render_audio_player_screen(&self, cx: &mut Context<Self>) -> impl IntoElement {
         audio_player::render(self, cx)
-    }
-
-    fn render_video_player_screen(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        video_player::render(self, window, cx)
     }
 
     // ── Demo screen content (rendered below the TopAppBar) ────────────────────
