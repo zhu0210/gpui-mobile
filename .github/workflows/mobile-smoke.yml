@@ -136,6 +136,14 @@ jobs:
             tail -40 smoke/log.txt
             exit 1
           fi
+          # The in-scene video screen (`gpui_mobile::media`), opened directly.
+          xcrun simctl terminate "$sim" dev.gpui.mobile.example || true
+          SIMCTL_CHILD_GPUI_INITIAL_SCREEN=native_video xcrun simctl launch "$sim" dev.gpui.mobile.example
+          sleep 15
+          xcrun simctl io "$sim" screenshot smoke/native-video.png
+          xcrun simctl spawn "$sim" log show --last 1m --style compact \
+            --predicate 'process == "GpuiExample"' > smoke/native-video-log.txt || true
+          grep -E "video:|panic" smoke/native-video-log.txt | tail -20 || true
 
       - name: Upload screenshot and logs
         if: always()

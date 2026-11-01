@@ -120,7 +120,11 @@ pub fn render(_cx: &App) -> AnyElement {
             div()
                 .text_sm()
                 .text_color(rgb(SUBTEXT))
-                .child("Decoded by MediaCodec into an AHardwareBuffer, imported into Vulkan and drawn as a GPUI image, paced by the AAudio clock. No CPU copies."),
+                .child(if cfg!(target_os = "ios") {
+                    "Played by AVPlayer, each frame an IOSurface wrapped as a Metal texture and drawn as a GPUI image. No CPU copies."
+                } else {
+                    "Decoded by MediaCodec into an AHardwareBuffer, imported into Vulkan and drawn as a GPUI image, paced by the AAudio clock. No CPU copies."
+                }),
         )
         .child(div().flex().flex_wrap().gap_2().children(clip_buttons))
         .child(
