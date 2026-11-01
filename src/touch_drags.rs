@@ -104,6 +104,8 @@ fn follow(
         (TouchPhase::Started | TouchPhase::Moved, press) => press,
         (TouchPhase::Ended, Press::Dragging) => {
             replay(up(at), window, cx);
+            // A lifted finger leaves nothing under it, so nothing stays hovered.
+            replay(moved_away(), window, cx);
             Press::Idle
         }
         (TouchPhase::Cancelled, Press::Dragging) => {
@@ -144,6 +146,15 @@ fn moved(position: Point<Pixels>) -> PlatformInput {
     })
 }
 
+/// A move off the window, where no hitbox is: GPUI has no event for a lifted pointer.
+fn moved_away() -> PlatformInput {
+    PlatformInput::MouseMove(MouseMoveEvent {
+        position: Point::new(px(-1.), px(-1.)),
+        pressed_button: None,
+        modifiers: Modifiers::default(),
+    })
+}
+
 fn up(position: Point<Pixels>) -> PlatformInput {
     PlatformInput::MouseUp(MouseUpEvent {
         button: MouseButton::Left,
@@ -177,12 +188,14 @@ mod tests {
     struct Board {
         dropped: Rc<RefCell<Vec<&'static str>>>,
         clicked: Rc<Cell<usize>>,
+        bin_hovered: Rc<Cell<bool>>,
     }
 
     impl Render for Board {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let dropped = self.dropped.clone();
             let clicked = self.clicked.clone();
+            let bin_hovered = self.bin_hovered.clone();
             div()
                 .size_full()
                 .child(touch_drags())
@@ -198,6 +211,7 @@ mod tests {
                     div()
                         .id("bin")
                         .size(px(50.))
+                        .on_hover(move |hovered, _, _| bin_hovered.set(*hovered))
                         .on_drop(move |card: &Card, _, _| dropped.borrow_mut().push(card.0)),
                 )
         }
@@ -248,11 +262,17 @@ mod tests {
     fn board(cx: &mut TestAppContext) -> (Board, &mut VisualTestContext) {
         let dropped = Rc::new(RefCell::new(Vec::new()));
         let clicked = Rc::new(Cell::new(0));
+        let bin_hovered = Rc::new(Cell::new(false));
         let board = Board {
             dropped: dropped.clone(),
             clicked: clicked.clone(),
+            bin_hovered: bin_hovered.clone(),
         };
-        let (_, cx) = cx.add_window_view(move |_, _| Board { dropped, clicked });
+        let (_, cx) = cx.add_window_view(move |_, _| Board {
+            dropped,
+            clicked,
+            bin_hovered,
+        });
         cx.simulate_resize(size(px(100.), px(200.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         (board, cx)
@@ -267,6 +287,10 @@ mod tests {
         press(TouchPhase::Ended, point(px(25.), px(75.)), cx);
         assert_eq!(*board.dropped.borrow(), ["ace"]);
         assert_eq!(board.clicked.get(), 0);
+        assert!(
+            !board.bin_hovered.get(),
+            "the bin stays hovered after the finger lifts"
+        );
     }
 
     #[gpui::test]
