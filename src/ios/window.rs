@@ -575,6 +575,8 @@ pub(crate) struct IosWindow {
     hover_status_callback: RefCell<Option<Box<dyn FnMut(bool)>>>,
     /// Callback for resize events
     resize_callback: RefCell<Option<Box<dyn FnMut(Size<Pixels>, f32)>>>,
+    /// The keyboard height GPUI last laid out for; see [`Self::follow_keyboard`].
+    laid_out_keyboard: Cell<f32>,
     /// Callback for move events (not applicable on iOS)
     moved_callback: RefCell<Option<Box<dyn FnMut()>>>,
     /// Callback for should close
@@ -716,6 +718,7 @@ impl IosWindow {
                 visibility_callback: RefCell::new(None),
                 hover_status_callback: RefCell::new(None),
                 resize_callback: RefCell::new(None),
+                laid_out_keyboard: Cell::new(0.0),
                 moved_callback: RefCell::new(None),
                 should_close_callback: RefCell::new(None),
                 hit_test_callback: RefCell::new(None),
@@ -1289,14 +1292,28 @@ impl IosWindow {
             }
 
             // Fire the resize callback so GPUI re-layouts at the new size.
-            let cb = self.resize_callback.borrow_mut().take();
-            if let Some(mut cb) = cb {
-                cb(new_size, new_scale);
-                // Restore the callback for future resize events.
-                let mut slot = self.resize_callback.borrow_mut();
-                if slot.is_none() {
-                    *slot = Some(cb);
-                }
+            self.notify_resize(new_size, new_scale);
+        }
+    }
+
+    /// Re-lays GPUI out when the keyboard has opened, closed or changed height
+    /// since the last frame: [`PlatformWindow::content_size`] leaves it out.
+    /// The keyboard observers hold no window, so the frame callback calls this.
+    pub(super) fn follow_keyboard(&self) {
+        let keyboard = crate::keyboard_height();
+        if self.laid_out_keyboard.replace(keyboard) != keyboard {
+            self.notify_resize(self.bounds.get().size, self.scale_factor.get());
+        }
+    }
+
+    fn notify_resize(&self, size: Size<Pixels>, scale: f32) {
+        let cb = self.resize_callback.borrow_mut().take();
+        if let Some(mut cb) = cb {
+            cb(size, scale);
+            // Restore the callback for future resize events.
+            let mut slot = self.resize_callback.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(cb);
             }
         }
     }
@@ -1337,8 +1354,14 @@ impl PlatformWindow for IosWindow {
         WindowBounds::Fullscreen(self.bounds.get())
     }
 
+    /// The window above the software keyboard, so a centered dialog or a
+    /// scrolled field stays in sight.
     fn content_size(&self) -> Size<Pixels> {
-        self.bounds.get().size
+        let size = self.bounds.get().size;
+        Size {
+            width: size.width,
+            height: (size.height - px(crate::keyboard_height())).max(px(0.0)),
+        }
     }
 
     fn resize(&mut self, _size: Size<Pixels>) {
