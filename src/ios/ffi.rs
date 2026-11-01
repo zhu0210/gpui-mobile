@@ -325,6 +325,7 @@ pub extern "C" fn gpui_ios_request_frame(window_ptr: *mut c_void) -> bool {
     // asking for its next frame) must survive into the return value, so the
     // slate is cleared before the frame, not after.
     window.frame_demand.clear();
+    window.follow_keyboard();
 
     // Take the callback, invoke it, then restore it
     // We must complete the borrow before invoking the callback,
