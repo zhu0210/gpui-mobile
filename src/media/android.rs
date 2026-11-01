@@ -57,6 +57,11 @@ pub(super) struct Decoder {
     frames_shown: Cell<u64>,
     last_import: Cell<Option<Instant>>,
     drift: Cell<Drift>,
+    /// Software-decoded frames waiting for upload (FFmpeg's fallback).
+    #[cfg(feature = "ffmpeg")]
+    software: Option<Arc<Mutex<Option<super::planes::SoftwareFrame>>>>,
+    #[cfg(feature = "ffmpeg")]
+    uploader: RefCell<super::planes::Uploader>,
 }
 
 /// How far imported frames were from the clock, between log reports.
@@ -68,7 +73,18 @@ struct Drift {
 }
 
 impl Decoder {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, source: super::Source) -> Result<Self> {
+        match source {
+            super::Source::Platform => Self::open_platform(path),
+            #[cfg(feature = "ffmpeg")]
+            super::Source::Ffmpeg => Self::open_ffmpeg(path, false),
+            #[cfg(feature = "ffmpeg")]
+            super::Source::FfmpegSoftware => Self::open_ffmpeg(path, true),
+        }
+    }
+
+    /// `AMediaExtractor` + `AMediaCodec`.
+    fn open_platform(path: &Path) -> Result<Self> {
         let video = Track::open(path, "video/")?.ok_or_else(|| anyhow!("no video track"))?;
         let audio = Track::open(path, "audio/").unwrap_or_else(|error| {
             log::warn!("video: audio track skipped: {error:#}");
@@ -90,15 +106,71 @@ impl Decoder {
         // The reader's window stays valid until the reader is deleted, which
         // `Decoder::drop` does after the threads have deleted the codecs.
         video.start(reader.window()?)?;
-        if let Some(audio) = &audio {
-            audio.start(ptr::null_mut())?;
-        }
+        let audio = match audio {
+            Some(audio) => {
+                audio.start(ptr::null_mut())?;
+                Some(CodecAudio::new(audio)?)
+            }
+            None => None,
+        };
         log::info!(
             "video: decoding {} {width}x{height} (rotated {rotation}°, audio {}) from {path:?}",
             video.mime,
-            audio.as_ref().map_or("none", |audio| audio.mime.as_str()),
+            audio.as_ref().map_or("none", |audio| audio.track.mime.as_str()),
         );
+        let video = CodecVideo {
+            track: video,
+            input_done: false,
+        };
+        Self::start(
+            reader,
+            (width, height, rotation, duration_us),
+            video,
+            audio.map(|audio| Box::new(audio) as Box<dyn AudioSource + Send>),
+        )
+    }
 
+    /// FFmpeg demuxing, decoding through MediaCodec into the reader, or in
+    /// software when MediaCodec can't (or `software` asks for it).
+    #[cfg(feature = "ffmpeg")]
+    fn open_ffmpeg(path: &Path, software: bool) -> Result<Self> {
+        use super::ffmpeg::{probe, FfmpegAudio, FfmpegVideo};
+        let info = probe(path)?;
+        let reader = Reader::new(info.width, info.height)?;
+        let slot = Arc::new(Mutex::new(None));
+        let window = if software { None } else { Some(reader.window()?) };
+        let (video, _hardware) = FfmpegVideo::open(path, window, slot.clone())?;
+        let audio = if info.has_audio {
+            FfmpegAudio::open(path)
+                .map_err(|error| log::warn!("video: audio stream skipped: {error:#}"))
+                .ok()
+        } else {
+            None
+        };
+        log::info!(
+            "video: FFmpeg playing {}x{} (rotated {}°, audio {}) from {path:?}",
+            info.width,
+            info.height,
+            info.rotation,
+            audio.is_some(),
+        );
+        let mut decoder = Self::start(
+            reader,
+            (info.width, info.height, info.rotation, info.duration_us),
+            video,
+            audio.map(|audio| Box::new(audio) as Box<dyn AudioSource + Send>),
+        )?;
+        decoder.software = Some(slot);
+        Ok(decoder)
+    }
+
+    /// Starts the playback threads.
+    fn start<V: VideoSource + Send + 'static>(
+        reader: Reader,
+        (width, height, rotation, duration_us): (i32, i32, i32, i64),
+        mut video: V,
+        audio: Option<Box<dyn AudioSource + Send>>,
+    ) -> Result<Self> {
         let mut state = State {
             playing: true,
             audio: audio.is_some(),
@@ -114,16 +186,16 @@ impl Decoder {
             .spawn({
                 let shared = shared.clone();
                 move || {
-                    if let Err(error) = play_video(&video, &shared) {
+                    if let Err(error) = play_video(&mut video, &shared) {
                         log::error!("video: decoding stopped: {error:#}");
                     }
                 }
             })?];
-        if let Some(audio) = audio {
+        if let Some(mut audio) = audio {
             threads.push(std::thread::Builder::new().name("gpui-audio".into()).spawn({
                 let shared = shared.clone();
                 move || {
-                    if let Err(error) = play_audio(&audio, &shared) {
+                    if let Err(error) = play_audio(audio.as_mut(), &shared) {
                         log::error!("video: audio stopped: {error:#}");
                     }
                     // The video goes on by the monotonic clock.
@@ -149,6 +221,10 @@ impl Decoder {
             frames_shown: Cell::new(0),
             last_import: Cell::new(None),
             drift: Cell::new(Drift::default()),
+            #[cfg(feature = "ffmpeg")]
+            software: None,
+            #[cfg(feature = "ffmpeg")]
+            uploader: RefCell::new(Default::default()),
         })
     }
 
@@ -215,6 +291,13 @@ impl Decoder {
     /// Imports the newest decoded image, if there is one, and makes it the
     /// texture drawn for `image_id`.
     pub fn update(&self, image_id: ImageId) -> Result<()> {
+        #[cfg(feature = "ffmpeg")]
+        if let Some(slot) = &self.software {
+            let frame = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(frame) = frame {
+                return self.upload(image_id, &frame);
+            }
+        }
         let Some(image) = self.reader.acquire_latest()? else {
             return Ok(());
         };
@@ -245,6 +328,34 @@ impl Decoder {
             );
         }
         self.record_drift(timestamp_us);
+        Ok(())
+    }
+
+    /// Uploads a software-decoded frame and makes it the texture drawn for
+    /// `image_id`.
+    #[cfg(feature = "ffmpeg")]
+    fn upload(&self, image_id: ImageId, frame: &super::planes::SoftwareFrame) -> Result<()> {
+        let platform =
+            crate::android::jni::platform().ok_or_else(|| anyhow!("platform not initialised"))?;
+        let context = platform.gpu_context();
+        let context = context.borrow();
+        let context = context.as_ref().ok_or_else(|| anyhow!("no GPU context yet"))?;
+        let texture = self
+            .uploader
+            .borrow_mut()
+            .convert(frame, self.rotation, &context.device, &context.queue)?;
+        gpui_wgpu::set_external_texture(image_id, &texture);
+        self.last_import.set(Some(Instant::now()));
+        let shown = self.frames_shown.get() + 1;
+        self.frames_shown.set(shown);
+        if shown == 1 {
+            log::info!(
+                "video: software frame uploaded as {}x{} planes, converted on the GPU",
+                texture.width(),
+                texture.height()
+            );
+        }
+        self.record_drift(frame.timestamp_us);
         Ok(())
     }
 
@@ -439,11 +550,50 @@ impl Shared {
     }
 }
 
+/// What a video source produced.
+pub(super) enum VideoOutput<F> {
+    /// Nothing yet; try again.
+    Pending,
+    End,
+    /// A frame and its presentation time.
+    Frame(i64, F),
+}
+
+/// A video decoder the playback loop drives: `AMediaCodec`, or FFmpeg.
+pub(super) trait VideoSource {
+    type Frame;
+    /// Moves to the sync sample at or before `target_us`, dropping what the
+    /// decoder holds.
+    fn seek(&mut self, target_us: i64) -> Result<()>;
+    fn next(&mut self) -> Result<VideoOutput<Self::Frame>>;
+    /// Hands the frame back, shown (rendered into the reader, or queued for
+    /// upload) when `render`.
+    fn release(&mut self, frame: Self::Frame, render: bool) -> Result<()>;
+}
+
+/// What an audio source produced.
+pub(super) enum AudioOutput {
+    Pending,
+    End,
+    /// The output switched to this sample rate and channel count.
+    Format((i32, i32)),
+    /// Interleaved 16-bit samples, valid until `release`.
+    Samples { pts: i64, data: *const i16, frames: usize },
+}
+
+pub(super) trait AudioSource {
+    /// The sample rate and channel count before any `Format` output.
+    fn format(&self) -> Result<(i32, i32)>;
+    fn seek(&mut self, target_us: i64) -> Result<()>;
+    fn next(&mut self) -> Result<AudioOutput>;
+    /// Gives back the samples of the last `Samples` output.
+    fn release(&mut self) -> Result<()>;
+}
+
 /// Decodes video and renders each frame into the reader when the clock
 /// reaches it; drops late frames and, after a seek, those before the target.
-fn play_video(track: &Track, shared: &Shared) -> Result<()> {
-    let codec = track.codec.0.as_ptr();
-    let (mut generation, mut target, mut input_done, mut first, mut last_us) = (0, 0, false, false, 0);
+fn play_video<S: VideoSource>(source: &mut S, shared: &Shared) -> Result<()> {
+    let (mut generation, mut target, mut first, mut last_us) = (0, 0, false, 0);
     loop {
         let mut state = shared.lock();
         if state.stop {
@@ -453,8 +603,8 @@ fn play_video(track: &Track, shared: &Shared) -> Result<()> {
             generation = state.seek_generation;
             target = state.seek_target_us;
             drop(state);
-            track.seek(target)?;
-            (input_done, first) = (false, true);
+            source.seek(target)?;
+            first = true;
             continue;
         }
         if let Some(video_end) = state.video_end_us {
@@ -478,20 +628,9 @@ fn play_video(track: &Track, shared: &Shared) -> Result<()> {
         }
         drop(state);
 
-        if !input_done {
-            input_done = track.feed()?;
-        }
-        // SAFETY: the codec is owned by this thread; the index comes from it.
-        unsafe {
-            let mut info = std::mem::zeroed::<ffi::AMediaCodecBufferInfo>();
-            let index = ffi::AMediaCodec_dequeueOutputBuffer(codec, &mut info, DEQUEUE_TIMEOUT_US);
-            if index < 0 {
-                // Try-again, format and buffer changes need nothing here.
-                continue;
-            }
-            let index = index as usize;
-            if info.flags & ffi::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM as u32 != 0 {
-                status(ffi::AMediaCodec_releaseOutputBuffer(codec, index, false))?;
+        let (pts, frame) = match source.next()? {
+            VideoOutput::Pending => continue,
+            VideoOutput::End => {
                 shared.update(|state| {
                     if state.seek_generation == generation {
                         state.video_end_us = Some(last_us.max(target));
@@ -500,33 +639,32 @@ fn play_video(track: &Track, shared: &Shared) -> Result<()> {
                 });
                 continue;
             }
-            let pts = info.presentationTimeUs;
-            last_us = pts;
-            let render = if pts < target {
-                false
-            } else if first {
-                // The first frame after a seek shows at once, even when paused.
-                first = false;
-                shared.update(|state| {
-                    if state.seek_generation == generation && !state.audio {
-                        state.holding = false;
-                    }
-                });
-                true
-            } else {
-                shared.wait_until(generation, pts).is_some_and(|late| late <= LATE_US)
-            };
-            status(ffi::AMediaCodec_releaseOutputBuffer(codec, index, render))?;
-        }
+            VideoOutput::Frame(pts, frame) => (pts, frame),
+        };
+        last_us = pts;
+        let render = if pts < target {
+            false
+        } else if first {
+            // The first frame after a seek shows at once, even when paused.
+            first = false;
+            shared.update(|state| {
+                if state.seek_generation == generation && !state.audio {
+                    state.holding = false;
+                }
+            });
+            true
+        } else {
+            shared.wait_until(generation, pts).is_some_and(|late| late <= LATE_US)
+        };
+        source.release(frame, render)?;
     }
 }
 
 /// Decodes audio and writes it to an AAudio stream, which paces the thread;
 /// the stream's timestamps drive the clock.
-fn play_audio(track: &Track, shared: &Shared) -> Result<()> {
-    let codec = track.codec.0.as_ptr();
+fn play_audio(source: &mut dyn AudioSource, shared: &Shared) -> Result<()> {
     let mut stream: Option<Stream> = None;
-    let (mut generation, mut target, mut input_done) = (0, 0, false);
+    let (mut generation, mut target) = (0, 0);
     // When the first samples since the last seek went to the stream.
     let mut first_write: Option<Instant> = None;
     // Frames written before the first sample since the last seek, and its time.
@@ -541,11 +679,11 @@ fn play_audio(track: &Track, shared: &Shared) -> Result<()> {
             generation = state.seek_generation;
             target = state.seek_target_us;
             drop(state);
-            track.seek(target)?;
+            source.seek(target)?;
             if let Some(stream) = &stream {
                 stream.pause_and_flush();
             }
-            (input_done, first_write, base) = (false, None, None);
+            (first_write, base) = (None, None);
             continue;
         }
         let (running, holding, finished) = (state.running, state.holding, state.audio_end_us.is_some());
@@ -558,9 +696,149 @@ fn play_audio(track: &Track, shared: &Shared) -> Result<()> {
         }
         drop(state);
 
-        if !input_done {
-            input_done = track.feed()?;
+        let (mut pts, data, frames) = match source.next()? {
+            AudioOutput::Pending => continue,
+            AudioOutput::Format((rate, channels)) => {
+                stream = Some(Stream::open(rate, channels)?);
+                continue;
+            }
+            AudioOutput::End => {
+                shared.update(|state| {
+                    if state.seek_generation == generation {
+                        state.audio_end_us = Some(end_us.max(target));
+                        state.holding = false;
+                    }
+                });
+                continue;
+            }
+            AudioOutput::Samples { pts, data, frames } => (pts, data, frames),
+        };
+        if stream.is_none() {
+            let (rate, channels) = source.format()?;
+            stream = Some(Stream::open(rate, channels)?);
         }
+        let stream = stream.as_ref().ok_or_else(|| anyhow!("no audio stream"))?;
+        let (rate, channels) = (stream.rate as i64, stream.channels as usize);
+        let mut offset = 0;
+        if pts < target {
+            offset = (((target - pts) * rate / 1_000_000) as usize).min(frames);
+            pts += offset as i64 * 1_000_000 / rate;
+        }
+        if offset < frames {
+            let (base_frames, base_us) = *base.get_or_insert((stream.frames_written(), pts));
+            end_us = pts + (frames - offset) as i64 * 1_000_000 / rate;
+            while offset < frames {
+                let state = shared.lock();
+                if state.stop || state.seek_generation != generation {
+                    break;
+                }
+                let sound = state.wants_sound();
+                drop(state);
+                stream.follow(sound);
+                // Blocks while the stream's buffer is full, which paces this thread.
+                // SAFETY: the source keeps `frames` frames at `data` until `release`.
+                let written = unsafe { stream.write(data.add(offset * channels).cast(), frames - offset)? };
+                offset += written;
+                if written > 0 {
+                    first_write.get_or_insert_with(Instant::now);
+                }
+                // Without timestamps the clock starts on its own.
+                if first_write.is_some_and(|time| time.elapsed() > HOLD_TIMEOUT) {
+                    shared.update(|state| {
+                        if state.seek_generation == generation {
+                            state.holding = false;
+                        }
+                    });
+                }
+                if let Some((frame, time_ns)) = stream.timestamp() {
+                    if frame >= base_frames {
+                        shared.sync(generation, base_us + (frame - base_frames) * 1_000_000 / rate, time_ns);
+                    }
+                }
+            }
+        }
+        source.release()?;
+    }
+}
+
+/// The platform video decoder: an `AMediaCodec` rendering into the reader.
+struct CodecVideo {
+    track: Track,
+    input_done: bool,
+}
+
+impl VideoSource for CodecVideo {
+    /// The codec's output buffer index.
+    type Frame = usize;
+
+    fn seek(&mut self, target_us: i64) -> Result<()> {
+        self.input_done = false;
+        self.track.seek(target_us)
+    }
+
+    fn next(&mut self) -> Result<VideoOutput<usize>> {
+        if !self.input_done {
+            self.input_done = self.track.feed()?;
+        }
+        let codec = self.track.codec.0.as_ptr();
+        // SAFETY: the codec is owned by this thread; the index comes from it.
+        unsafe {
+            let mut info = std::mem::zeroed::<ffi::AMediaCodecBufferInfo>();
+            let index = ffi::AMediaCodec_dequeueOutputBuffer(codec, &mut info, DEQUEUE_TIMEOUT_US);
+            if index < 0 {
+                // Try-again, format and buffer changes need nothing here.
+                return Ok(VideoOutput::Pending);
+            }
+            if info.flags & ffi::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM as u32 != 0 {
+                status(ffi::AMediaCodec_releaseOutputBuffer(codec, index as usize, false))?;
+                return Ok(VideoOutput::End);
+            }
+            Ok(VideoOutput::Frame(info.presentationTimeUs, index as usize))
+        }
+    }
+
+    fn release(&mut self, index: usize, render: bool) -> Result<()> {
+        // SAFETY: the index came from this codec and is released once.
+        status(unsafe { ffi::AMediaCodec_releaseOutputBuffer(self.track.codec.0.as_ptr(), index, render) })
+    }
+}
+
+/// The platform audio decoder: an `AMediaCodec` decoding to memory.
+struct CodecAudio {
+    track: Track,
+    input_done: bool,
+    channels: i32,
+    /// The output buffer being played.
+    index: Option<usize>,
+}
+
+impl CodecAudio {
+    fn new(track: Track) -> Result<Self> {
+        let (_, channels) = pcm_format(&track.format)?;
+        Ok(Self {
+            track,
+            input_done: false,
+            channels,
+            index: None,
+        })
+    }
+}
+
+impl AudioSource for CodecAudio {
+    fn format(&self) -> Result<(i32, i32)> {
+        pcm_format(&self.track.format)
+    }
+
+    fn seek(&mut self, target_us: i64) -> Result<()> {
+        self.input_done = false;
+        self.track.seek(target_us)
+    }
+
+    fn next(&mut self) -> Result<AudioOutput> {
+        if !self.input_done {
+            self.input_done = self.track.feed()?;
+        }
+        let codec = self.track.codec.0.as_ptr();
         // SAFETY: the codec is owned by this thread; the index, buffer and
         // length come from it and stay valid until the buffer is released.
         unsafe {
@@ -570,73 +848,58 @@ fn play_audio(track: &Track, shared: &Shared) -> Result<()> {
                 let format = NonNull::new(ffi::AMediaCodec_getOutputFormat(codec))
                     .map(Format)
                     .ok_or_else(|| anyhow!("no audio output format"))?;
-                stream = Some(Stream::open(&format)?);
-                continue;
+                let format = pcm_format(&format)?;
+                self.channels = format.1;
+                return Ok(AudioOutput::Format(format));
             }
             if index < 0 {
-                continue;
+                return Ok(AudioOutput::Pending);
             }
             let index = index as usize;
-            if stream.is_none() {
-                stream = Some(Stream::open(&track.format)?);
-            }
-            let stream = stream.as_ref().ok_or_else(|| anyhow!("no audio stream"))?;
-            let (rate, frame_bytes) = (stream.rate as i64, stream.channels as usize * 2);
             if info.flags & ffi::AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM as u32 != 0 {
                 status(ffi::AMediaCodec_releaseOutputBuffer(codec, index, false))?;
-                shared.update(|state| {
-                    if state.seek_generation == generation {
-                        state.audio_end_us = Some(end_us.max(target));
-                        state.holding = false;
-                    }
-                });
-                continue;
+                return Ok(AudioOutput::End);
             }
             let mut capacity = 0;
-            let data = ffi::AMediaCodec_getOutputBuffer(codec, index, &mut capacity)
-                .add(info.offset as usize);
-            let frames = info.size as usize / frame_bytes;
-            let mut pts = info.presentationTimeUs;
-            let mut offset = 0;
-            if pts < target {
-                offset = (((target - pts) * rate / 1_000_000) as usize).min(frames);
-                pts += offset as i64 * 1_000_000 / rate;
-            }
-            if offset < frames {
-                let (base_frames, base_us) = *base.get_or_insert((stream.frames_written(), pts));
-                end_us = pts + (frames - offset) as i64 * 1_000_000 / rate;
-                while offset < frames {
-                    let state = shared.lock();
-                    if state.stop || state.seek_generation != generation {
-                        break;
-                    }
-                    let sound = state.wants_sound();
-                    drop(state);
-                    stream.follow(sound);
-                    // Blocks while the stream's buffer is full, which paces this thread.
-                    let written = stream.write(data.add(offset * frame_bytes).cast(), frames - offset)?;
-                    offset += written;
-                    if written > 0 {
-                        first_write.get_or_insert_with(Instant::now);
-                    }
-                    // Without timestamps the clock starts on its own.
-                    if first_write.is_some_and(|time| time.elapsed() > HOLD_TIMEOUT) {
-                        shared.update(|state| {
-                            if state.seek_generation == generation {
-                                state.holding = false;
-                            }
-                        });
-                    }
-                    if let Some((frame, time_ns)) = stream.timestamp() {
-                        if frame >= base_frames {
-                            shared.sync(generation, base_us + (frame - base_frames) * 1_000_000 / rate, time_ns);
-                        }
-                    }
-                }
-            }
-            status(ffi::AMediaCodec_releaseOutputBuffer(codec, index, false))?;
+            let data = ffi::AMediaCodec_getOutputBuffer(codec, index, &mut capacity).add(info.offset as usize);
+            self.index = Some(index);
+            Ok(AudioOutput::Samples {
+                pts: info.presentationTimeUs,
+                data: data.cast(),
+                frames: info.size as usize / (self.channels as usize * 2),
+            })
         }
     }
+
+    fn release(&mut self) -> Result<()> {
+        match self.index.take() {
+            // SAFETY: the index came from this codec and is released once.
+            Some(index) => status(unsafe {
+                ffi::AMediaCodec_releaseOutputBuffer(self.track.codec.0.as_ptr(), index, false)
+            }),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The sample rate and channel count of a decoder's 16-bit PCM output.
+fn pcm_format(format: &Format) -> Result<(i32, i32)> {
+    // SAFETY: the NDK key statics are initialised C strings.
+    let (rate, channels) = unsafe {
+        (
+            format.int32(ffi::AMEDIAFORMAT_KEY_SAMPLE_RATE),
+            format.int32(ffi::AMEDIAFORMAT_KEY_CHANNEL_COUNT),
+        )
+    };
+    let (Some(rate), Some(channels)) = (rate, channels) else {
+        bail!("audio format without a sample rate or channel count");
+    };
+    if let Some(encoding) = format.int32(KEY_PCM_ENCODING.as_ptr()) {
+        if encoding != ENCODING_PCM_16BIT {
+            bail!("audio decoder outputs PCM encoding {encoding}, not 16-bit");
+        }
+    }
+    Ok((rate, channels))
 }
 
 fn status(status: ffi::media_status_t) -> Result<()> {
@@ -839,23 +1102,8 @@ struct Stream {
 }
 
 impl Stream {
-    /// Opens a stream for the sample rate and channel count in `format`.
-    fn open(format: &Format) -> Result<Self> {
-        // SAFETY: the NDK key statics are initialised C strings.
-        let (rate, channels) = unsafe {
-            (
-                format.int32(ffi::AMEDIAFORMAT_KEY_SAMPLE_RATE),
-                format.int32(ffi::AMEDIAFORMAT_KEY_CHANNEL_COUNT),
-            )
-        };
-        let (Some(rate), Some(channels)) = (rate, channels) else {
-            bail!("audio format without a sample rate or channel count");
-        };
-        if let Some(encoding) = format.int32(KEY_PCM_ENCODING.as_ptr()) {
-            if encoding != ENCODING_PCM_16BIT {
-                bail!("audio decoder outputs PCM encoding {encoding}, not 16-bit");
-            }
-        }
+    /// Opens a stream of 16-bit PCM at `rate` with `channels` channels.
+    fn open(rate: i32, channels: i32) -> Result<Self> {
         // SAFETY: the builder is deleted once, after opening; the stream it
         // opens is owned by the returned value.
         unsafe {
