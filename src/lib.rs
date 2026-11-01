@@ -305,6 +305,21 @@ use std::sync::atomic::AtomicU32;
 /// Read with `keyboard_height()`.
 pub static KEYBOARD_HEIGHT_BITS: AtomicU32 = AtomicU32::new(0);
 
+static CARET_BOUNDS: std::sync::Mutex<Option<gpui::Bounds<gpui::Pixels>>> =
+    std::sync::Mutex::new(None);
+
+/// Where the focused input's caret was last drawn, in window coordinates, while
+/// the software keyboard is up. An app scrolls it above the keyboard with this.
+/// Android only for now; `None` elsewhere, or when no input has focus.
+pub fn caret_bounds() -> Option<gpui::Bounds<gpui::Pixels>> {
+    *CARET_BOUNDS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn set_caret_bounds(bounds: Option<gpui::Bounds<gpui::Pixels>>) {
+    *CARET_BOUNDS.lock().unwrap_or_else(|e| e.into_inner()) = bounds;
+}
+
 /// Get the current software keyboard height in logical points.
 ///
 /// Returns 0.0 when the keyboard is hidden.
@@ -317,6 +332,9 @@ pub fn set_keyboard_height(height: f32) {
     let prev = f32::from_bits(KEYBOARD_HEIGHT_BITS.load(Ordering::Relaxed));
     if (prev - height).abs() > 0.5 {
         KEYBOARD_HEIGHT_BITS.store(height.to_bits(), Ordering::Release);
+        if height <= 0.0 {
+            set_caret_bounds(None);
+        }
         mark_text_input_dirty();
     }
 }

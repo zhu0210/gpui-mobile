@@ -1673,6 +1673,21 @@ impl PlatformWindow for AndroidPlatformWindow {
         let callback: Box<dyn FnMut(RequestFrameOptions)> = Box::new(move |options| {
             super::text_input::drain(&input_handler, &mut **input_callback.lock());
             callback(options);
+            // Where the caret is drawn now, for an app that keeps it above the keyboard.
+            if crate::keyboard_height() > 0.0 {
+                let handler = input_handler.borrow_mut().take();
+                let caret = handler.and_then(|mut handler| {
+                    let caret = handler
+                        .selected_text_range(false)
+                        .and_then(|selection| handler.bounds_for_range(selection.range));
+                    let mut slot = input_handler.borrow_mut();
+                    if slot.is_none() {
+                        *slot = Some(handler);
+                    }
+                    caret
+                });
+                crate::set_caret_bounds(caret);
+            }
         });
         // PlatformWindow gives us Box<dyn FnMut(...)> (not Send).
         // AndroidWindow::on_request_frame requires Send.  On Android the
