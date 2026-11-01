@@ -52,6 +52,20 @@ impl Decoder {
             }
             let asset: *mut AnyObject = msg_send![item, asset];
             let duration: CMTime = msg_send![asset, duration];
+            // The output hands out frames as stored. A composition built from
+            // the asset turns them by the track's transform, at the cost of
+            // one extra GPU pass, so only rotated tracks get one.
+            let tracks: *mut AnyObject = msg_send![asset, tracksWithMediaType: AVMediaTypeVideo];
+            let track: *mut AnyObject = msg_send![tracks, firstObject];
+            if !track.is_null() {
+                let transform: CGAffineTransform = msg_send![track, preferredTransform];
+                if (transform.a, transform.b, transform.c, transform.d) != (1.0, 0.0, 0.0, 1.0) {
+                    let composition: *mut AnyObject =
+                        msg_send![class!(AVVideoComposition), videoCompositionWithPropertiesOfAsset: asset];
+                    let _: () = msg_send![item, setVideoComposition: composition];
+                    log::info!("video: track turned by {:.0}°", transform.b.atan2(transform.a).to_degrees());
+                }
+            }
 
             let keys = [kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferMetalCompatibilityKey];
             let values: [*mut AnyObject; 2] = [
@@ -376,9 +390,28 @@ impl CMTime {
     }
 }
 
+/// CGAffineTransform as Core Graphics lays it out (64-bit).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGAffineTransform {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    tx: f64,
+    ty: f64,
+}
+
+// SAFETY: six doubles in a struct the runtime names `CGAffineTransform`.
+unsafe impl Encode for CGAffineTransform {
+    const ENCODING: Encoding = Encoding::Struct("CGAffineTransform", &[const { Encoding::Double }; 6]);
+}
+
 #[link(name = "AVFoundation", kind = "framework")]
 #[link(name = "CoreMedia", kind = "framework")]
-extern "C" {}
+extern "C" {
+    static AVMediaTypeVideo: *mut AnyObject;
+}
 
 #[link(name = "QuartzCore", kind = "framework")]
 extern "C" {

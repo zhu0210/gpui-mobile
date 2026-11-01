@@ -144,6 +144,14 @@ jobs:
           xcrun simctl spawn "$sim" log show --last 1m --style compact \
             --predicate 'process == "GpuiExample"' > smoke/native-video-log.txt || true
           grep -E "video:|panic" smoke/native-video-log.txt | tail -20 || true
+          # The rotated clip, turned by the track's transform.
+          xcrun simctl terminate "$sim" dev.gpui.mobile.example || true
+          SIMCTL_CHILD_GPUI_INITIAL_SCREEN=native_video SIMCTL_CHILD_GPUI_VIDEO_CLIP=1 \
+            xcrun simctl launch "$sim" dev.gpui.mobile.example
+          sleep 15
+          xcrun simctl io "$sim" screenshot smoke/native-video-rotated.png
+          xcrun simctl spawn "$sim" log show --last 1m --style compact \
+            --predicate 'process == "GpuiExample"' | grep -E "video:|panic" | tail -20 || true
 
       - name: Upload screenshot and logs
         if: always()
