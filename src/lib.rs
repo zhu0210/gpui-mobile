@@ -84,6 +84,8 @@ pub mod offscreen;
 pub mod packages;
 pub mod platform_view;
 pub mod target_platform;
+pub mod touch_drags;
+pub use touch_drags::touch_drags;
 
 // ── System chrome (status bar / navigation bar) styling ──────────────────────
 
