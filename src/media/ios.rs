@@ -28,6 +28,8 @@ const ACTION_PAUSE: isize = 1;
 const ACTION_NONE: isize = 2;
 /// `AVPlayerItemStatusReadyToPlay`.
 const ITEM_READY: isize = 1;
+/// `AVPlayerItemStatusFailed`.
+const ITEM_FAILED: isize = 2;
 
 pub(super) struct Decoder {
     player: *mut AnyObject,
@@ -248,6 +250,20 @@ impl Decoder {
         unsafe {
             let item = self.item();
             let status: isize = msg_send![item, status];
+            if status == ITEM_FAILED {
+                self.transform_checked.set(true);
+                let error: *mut AnyObject = msg_send![item, error];
+                let description: *mut AnyObject = msg_send![error, localizedDescription];
+                let text: *const std::ffi::c_char =
+                    if description.is_null() { ptr::null() } else { msg_send![description, UTF8String] };
+                let text = if text.is_null() {
+                    "no description".into()
+                } else {
+                    std::ffi::CStr::from_ptr(text).to_string_lossy()
+                };
+                log::warn!("video: the item failed: {text}");
+                return;
+            }
             if status != ITEM_READY {
                 return;
             }

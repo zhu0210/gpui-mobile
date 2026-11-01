@@ -27,7 +27,9 @@ const CLIPS: [(&str, Clip); 3] = [
     ),
     (
         "Stream",
-        Clip::Stream("https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"),
+        // The bundled clip again, served over HTTPS by jsDelivr (as video/mp4,
+        // with ranges; AVPlayer won't play GitHub raw's octet-stream).
+        Clip::Stream("https://cdn.jsdelivr.net/gh/zhu0210/gpui-mobile@2a29d54/example/assets/video/av-60s-640x360.mp4"),
     ),
 ];
 
