@@ -13,8 +13,8 @@ use anyhow::anyhow;
 use futures::channel::oneshot;
 use gpui::{
     Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle,
-    DummyKeyboardMapper, ForegroundExecutor, Keymap, Menu, MenuItem, PathPromptOptions, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+    DummyKeyboardMapper, ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions,
+    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PlatformWindow, Result, Task, ThermalState, WindowAppearance, WindowParams,
 };
 use objc2::runtime::AnyObject;
@@ -36,6 +36,8 @@ pub(crate) struct IosPlatformState {
     quit_callback: Option<Box<dyn FnMut() -> bool>>,
     open_urls_callback: Option<Box<dyn FnMut(Vec<String>)>>,
     thermal_state_callback: Option<Box<dyn FnMut()>>,
+    /// The app's menus, for in-window menu bars; iOS draws none of its own.
+    menus: Vec<OwnedMenu>,
 }
 
 impl Default for IosPlatform {
@@ -58,6 +60,7 @@ impl IosPlatform {
             quit_callback: None,
             open_urls_callback: None,
             thermal_state_callback: None,
+            menus: Vec::new(),
         }))
     }
 }
@@ -275,9 +278,13 @@ impl Platform for IosPlatform {
         // single UIScreen is managed by the scene lifecycle, so this is a no-op.
     }
 
-    fn set_menus(&self, _menus: Vec<Menu>, _keymap: &Keymap) {
-        // iOS doesn't have a menu bar
-        // Could potentially integrate with UIMenuBuilder for context menus
+    fn set_menus(&self, menus: Vec<Menu>, _keymap: &Keymap) {
+        // iOS has no menu bar; keep them for in-window menu bars.
+        self.0.lock().menus = menus.into_iter().map(Menu::owned).collect();
+    }
+
+    fn get_menus(&self) -> Option<Vec<OwnedMenu>> {
+        Some(self.0.lock().menus.clone())
     }
 
     fn set_dock_menu(&self, _menu: Vec<MenuItem>, _keymap: &Keymap) {

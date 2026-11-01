@@ -325,6 +325,7 @@ pub extern "C" fn gpui_ios_request_frame(window_ptr: *mut c_void) -> bool {
     // asking for its next frame) must survive into the return value, so the
     // slate is cleared before the frame, not after.
     window.frame_demand.clear();
+    window.follow_keyboard();
 
     // Take the callback, invoke it, then restore it
     // We must complete the borrow before invoking the callback,
@@ -552,6 +553,14 @@ pub extern "C" fn gpui_ios_run_demo() {
 /// registered via [`set_app_callback`].  If no callback was registered a
 /// default empty window is opened so the app doesn't crash.
 pub fn run_app() {
+    run_app_with_assets(());
+}
+
+/// Like [`run_app`], but registers an [`gpui::AssetSource`] first.
+///
+/// `Application::with_assets` consumes the builder before `run_embedded`, so the
+/// app callback, which only gets `&mut App`, cannot install one itself.
+pub fn run_app_with_assets(assets: impl gpui::AssetSource) {
     log::info!("GPUI iOS: Starting application");
 
     // Initialise the FFI layer if not already done.
@@ -564,23 +573,25 @@ pub fn run_app() {
     }
 
     let platform = Rc::new(super::IosPlatform::new());
-    let application = Application::with_platform(platform).run_embedded(|cx: &mut App| {
-        if let Some(cb) = take_app_callback() {
-            log::info!("GPUI iOS: Invoking user-provided app callback");
-            cb(cx);
-        } else {
-            log::warn!("GPUI iOS: No app callback registered — opening default empty window");
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: None,
-                    ..Default::default()
-                },
-                |_, cx| cx.new(|_| gpui::Empty),
-            )
-            .expect("Failed to open default window");
-            cx.activate(true);
-        }
-    });
+    let application = Application::with_platform(platform)
+        .with_assets(assets)
+        .run_embedded(|cx: &mut App| {
+            if let Some(cb) = take_app_callback() {
+                log::info!("GPUI iOS: Invoking user-provided app callback");
+                cb(cx);
+            } else {
+                log::warn!("GPUI iOS: No app callback registered — opening default empty window");
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: None,
+                        ..Default::default()
+                    },
+                    |_, cx| cx.new(|_| gpui::Empty),
+                )
+                .expect("Failed to open default window");
+                cx.activate(true);
+            }
+        });
 
     IOS_APPLICATION.with(|slot| *slot.borrow_mut() = Some(application));
 

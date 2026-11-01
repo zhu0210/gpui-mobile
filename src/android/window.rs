@@ -1126,7 +1126,8 @@ impl AndroidWindow {
     ///
     /// `ime_bottom` and `bars_bottom` are physical pixels from the window's
     /// insets. The keyboard height (logical pixels, including the system bars
-    /// it covers, as on iOS) goes to [`crate::set_keyboard_height`].
+    /// it covers, as on iOS) goes to [`crate::set_keyboard_height`]. When it
+    /// changes, GPUI re-lays out: the content size leaves the keyboard out.
     pub fn set_keyboard_inset(&self, ime_bottom: i32, bars_bottom: i32) {
         let scale = {
             let mut state = self.state.lock();
@@ -1136,7 +1137,11 @@ impl AndroidWindow {
             }
             state.scale_factor
         };
+        let before = crate::keyboard_height();
         crate::set_keyboard_height(ime_bottom.max(0) as f32 / scale);
+        if crate::keyboard_height() != before {
+            self.notify_resize();
+        }
     }
 
     // ── state queries ─────────────────────────────────────────────────────────
@@ -1543,8 +1548,14 @@ impl PlatformWindow for AndroidPlatformWindow {
         WindowBounds::Fullscreen(self.bounds())
     }
 
+    /// The window above the soft keyboard, as `adjustResize` gives native views,
+    /// so a centered dialog or a scrolled field stays in sight.
     fn content_size(&self) -> gpui::Size<gpui::Pixels> {
-        self.bounds().size
+        let size = self.bounds().size;
+        gpui::size(
+            size.width,
+            (size.height - gpui::px(crate::keyboard_height())).max(gpui::px(0.0)),
+        )
     }
 
     fn resize(&mut self, _size: gpui::Size<gpui::Pixels>) {
@@ -1673,6 +1684,21 @@ impl PlatformWindow for AndroidPlatformWindow {
         let callback: Box<dyn FnMut(RequestFrameOptions)> = Box::new(move |options| {
             super::text_input::drain(&input_handler, &mut **input_callback.lock());
             callback(options);
+            // Where the caret is drawn now, for an app that keeps it above the keyboard.
+            if crate::keyboard_height() > 0.0 {
+                let handler = input_handler.borrow_mut().take();
+                let caret = handler.and_then(|mut handler| {
+                    let caret = handler
+                        .selected_text_range(false)
+                        .and_then(|selection| handler.bounds_for_range(selection.range));
+                    let mut slot = input_handler.borrow_mut();
+                    if slot.is_none() {
+                        *slot = Some(handler);
+                    }
+                    caret
+                });
+                crate::set_caret_bounds(caret);
+            }
         });
         // PlatformWindow gives us Box<dyn FnMut(...)> (not Send).
         // AndroidWindow::on_request_frame requires Send.  On Android the
@@ -1739,7 +1765,28 @@ impl PlatformWindow for AndroidPlatformWindow {
                         gpui::TouchPhase::Cancelled => tap_start = None,
                     }
                 }
-                callback(event)
+                let typed = match &event {
+                    gpui::PlatformInput::KeyDown(key)
+                        if key.keystroke.modifiers.is_subset_of(&Modifiers::shift()) =>
+                    {
+                        key.keystroke.key_char.clone()
+                    }
+                    _ => None,
+                };
+                let result = callback(event);
+                // A key no binding took types its character, as on desktop: a hardware
+                // keyboard, or a soft keyboard that sends key events, reaches the input.
+                if let Some(text) = typed.filter(|_| result.propagate) {
+                    let handler = input_handler.borrow_mut().take();
+                    if let Some(mut handler) = handler {
+                        handler.replace_text_in_range(None, &text);
+                        let mut slot = input_handler.borrow_mut();
+                        if slot.is_none() {
+                            *slot = Some(handler);
+                        }
+                    }
+                }
+                result
             });
         // Bridge AndroidWindow touch/key callbacks → gpui::PlatformInput.
         //

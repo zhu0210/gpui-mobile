@@ -14,6 +14,8 @@ use std::{
 static SESSION: AtomicU64 = AtomicU64::new(0);
 static COMPOSING: AtomicBool = AtomicBool::new(false);
 static EVENTS: Mutex<VecDeque<ImeEvent>> = Mutex::new(VecDeque::new());
+/// The composing text a legacy client is showing; see [`forward_legacy_text`].
+static LEGACY_SHOWN: Mutex<String> = Mutex::new(String::new());
 
 pub(super) struct ImeEvent {
     pub session: u64,
@@ -27,6 +29,7 @@ pub(super) fn new_session() -> u64 {
     let session = SESSION.fetch_add(1, Ordering::AcqRel) + 1;
     EVENTS.lock().clear();
     COMPOSING.store(false, Ordering::Release);
+    LEGACY_SHOWN.lock().clear();
     session
 }
 
@@ -69,7 +72,8 @@ pub(super) fn drain(
         }
         // No RefCell borrow spans a GPUI update (which may replace the handler).
         let Some(mut handler) = slot.borrow_mut().take() else {
-            forward_legacy_text(event.kind, &event.text, event.start, |text| {
+            let mut shown = LEGACY_SHOWN.lock();
+            forward_legacy_text(event.kind, &event.text, event.start, &mut shown, |text| {
                 crate::dispatch_text_input(text);
             });
             continue;
@@ -130,9 +134,37 @@ pub(super) fn finish_composition(slot: &Rc<RefCell<Option<PlatformInputHandler>>
 /// Keep the original TextInput callback contract for clients without a platform
 /// input handler. Its backspace sentinel deletes one character per callback;
 /// exact UTF-16 ranges and forward deletion require PlatformInputHandler.
-fn forward_legacy_text(kind: i32, text: &str, before: usize, mut dispatch: impl FnMut(&str)) {
+///
+/// Such clients have no marked text, so composing text (kind 0) is typed in as
+/// it changes, and `shown` remembers it: the next composing update or the commit
+/// (kind 1, the IME's whole text) backspaces over what changed and types the rest.
+/// Without this, a keyboard that composes words shows nothing until Space.
+fn forward_legacy_text(
+    kind: i32,
+    text: &str,
+    before: usize,
+    shown: &mut String,
+    mut dispatch: impl FnMut(&str),
+) {
     match kind {
-        1 => dispatch(text),
+        0 | 1 => {
+            let common = shown
+                .chars()
+                .zip(text.chars())
+                .take_while(|(a, b)| a == b)
+                .count();
+            for _ in common..shown.chars().count() {
+                dispatch("\x08");
+            }
+            let rest: String = text.chars().skip(common).collect();
+            if !rest.is_empty() {
+                dispatch(&rest);
+            }
+            shown.clear();
+            if kind == 0 {
+                shown.push_str(text);
+            }
+        }
         2 | 3 => {
             for _ in 0..before {
                 dispatch("\x08");
@@ -178,10 +210,25 @@ mod tests {
     #[test]
     fn legacy_inputs_receive_commits_and_backspace_sentinels() {
         let mut received = Vec::new();
-        for (kind, text, before) in [(0, "ni", 0), (1, "你", 0), (2, "", 1), (3, "", 2)] {
-            forward_legacy_text(kind, text, before, |text| received.push(text.to_owned()));
+        let mut shown = String::new();
+        for (kind, text, before) in [
+            (0, "h", 0),
+            (0, "he", 0),
+            (1, "hey", 0),
+            (0, "ni", 0),
+            (1, "你", 0),
+            (2, "", 1),
+            (3, "", 2),
+        ] {
+            forward_legacy_text(kind, text, before, &mut shown, |text| {
+                received.push(text.to_owned())
+            });
         }
-        assert_eq!(received, vec!["你", "\x08", "\x08", "\x08"]);
+        assert_eq!(
+            received,
+            vec!["h", "e", "y", "ni", "\x08", "\x08", "你", "\x08", "\x08", "\x08"]
+        );
+        assert!(shown.is_empty());
     }
 
     #[test]
