@@ -1126,7 +1126,8 @@ impl AndroidWindow {
     ///
     /// `ime_bottom` and `bars_bottom` are physical pixels from the window's
     /// insets. The keyboard height (logical pixels, including the system bars
-    /// it covers, as on iOS) goes to [`crate::set_keyboard_height`].
+    /// it covers, as on iOS) goes to [`crate::set_keyboard_height`]. When it
+    /// changes, GPUI re-lays out: the content size leaves the keyboard out.
     pub fn set_keyboard_inset(&self, ime_bottom: i32, bars_bottom: i32) {
         let scale = {
             let mut state = self.state.lock();
@@ -1136,7 +1137,11 @@ impl AndroidWindow {
             }
             state.scale_factor
         };
+        let before = crate::keyboard_height();
         crate::set_keyboard_height(ime_bottom.max(0) as f32 / scale);
+        if crate::keyboard_height() != before {
+            self.notify_resize();
+        }
     }
 
     // ── state queries ─────────────────────────────────────────────────────────
@@ -1543,8 +1548,14 @@ impl PlatformWindow for AndroidPlatformWindow {
         WindowBounds::Fullscreen(self.bounds())
     }
 
+    /// The window above the soft keyboard, as `adjustResize` gives native views,
+    /// so a centered dialog or a scrolled field stays in sight.
     fn content_size(&self) -> gpui::Size<gpui::Pixels> {
-        self.bounds().size
+        let size = self.bounds().size;
+        gpui::size(
+            size.width,
+            (size.height - gpui::px(crate::keyboard_height())).max(gpui::px(0.0)),
+        )
     }
 
     fn resize(&mut self, _size: gpui::Size<gpui::Pixels>) {
