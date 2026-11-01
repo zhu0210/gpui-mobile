@@ -17,6 +17,9 @@
       registering, which changes mcc/mnc).  The Rust code handles these via
       NDK callbacks instead.  GPUI cannot move to a new Activity's thread, so
       a recreation restarts the process and loses the app's state.
+    - `stateNotNeeded` lets Android restart the activity after that restart.
+      Without it, an activity that never saved its state is removed when the
+      process dies ("app died, no saved state"), and the app just closes.
     - Hardware acceleration is enabled for Vulkan / GPU compositing.
     - The theme hides the title bar and status bar for a fullscreen
       immersive experience.
@@ -104,6 +107,7 @@
             android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|density|screenSize|smallestScreenSize|layoutDirection|colorMode|fontWeightAdjustment|grammaticalGender"
             android:exported="true"
             android:launchMode="singleTask"
+            android:stateNotNeeded="true"
             android:screenOrientation="unspecified"
             android:theme="@style/GpuiSplashTheme"
             android:windowSoftInputMode="adjustResize"
