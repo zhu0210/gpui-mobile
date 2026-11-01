@@ -198,6 +198,13 @@ pub extern "C" fn gpui_ios_register_app() {
     }));
 
     gpui_mobile::ios::ffi::set_app_callback(Box::new(|cx: &mut App| {
+        // Simulator smoke tests open a demo screen through the shared router
+        // instead of the Markdown sample, e.g.
+        // SIMCTL_CHILD_GPUI_INITIAL_SCREEN=native_video.
+        if std::env::var_os("GPUI_INITIAL_SCREEN").is_some() {
+            open_main_window(cx);
+            return;
+        }
         gpui_kit::init(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Light, None, cx);
         screens::markdown::init(cx);
