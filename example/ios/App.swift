@@ -83,8 +83,12 @@ final class GPUIContainerController: UIViewController {
         view.addSubview(gpuiView)
         gpuiView.attach(to: self)
 
+        // Full screen: the menu pads itself by the view's safe-area insets.
+        // Without the bottom safe area the keyboard guide ends at the screen
+        // edge while the keyboard is hidden.
+        view.keyboardLayoutGuide.usesBottomSafeArea = false
         NSLayoutConstraint.activate([
-            gpuiView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            gpuiView.topAnchor.constraint(equalTo: view.topAnchor),
             gpuiView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             gpuiView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             gpuiView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
