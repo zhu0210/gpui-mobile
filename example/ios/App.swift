@@ -7,11 +7,11 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         let window = UIWindow(frame: UIScreen.main.bounds)
-        // The Markdown sample is light. Set it on the window, not one controller,
-        // so the navigation controller and the status bar follow it too; otherwise
-        // a device in dark mode draws white status bar text on the white page.
-        window.overrideUserInterfaceStyle = .light
-        window.rootViewController = UINavigationController(rootViewController: MarkdownContainerController())
+        // The demo menu is dark. Set it on the window so the status bar follows
+        // it too; otherwise a device in light mode draws dark text on the dark page.
+        window.overrideUserInterfaceStyle = .dark
+        // The menu has its own header and back button, so no navigation bar.
+        window.rootViewController = GPUIContainerController()
         window.makeKeyAndVisible()
         self.window = window
         return true
@@ -27,7 +27,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 }
 
 /// UIKit owns this view's frame; GPUI owns only the content rendered inside it.
-final class GPUITextView: UIView {
+final class GPUIView: UIView {
     private let gpuiWindow: UnsafeMutableRawPointer
     let contentController: UIViewController
 
@@ -37,7 +37,7 @@ final class GPUITextView: UIView {
         gpui_ios_run_demo()
         guard let window = gpui_ios_get_window(),
               let controller = gpui_ios_view_controller(window) else {
-            fatalError("Could not create the GPUI Markdown view")
+            fatalError("Could not create the GPUI view")
         }
         gpuiWindow = window
         contentController = Unmanaged<UIViewController>.fromOpaque(controller).takeUnretainedValue()
@@ -70,25 +70,24 @@ final class GPUITextView: UIView {
     func drawFrame() { _ = gpui_ios_request_frame(gpuiWindow) }
 }
 
-final class MarkdownContainerController: UIViewController {
-    private var markdown: GPUITextView!
+final class GPUIContainerController: UIViewController {
+    private var gpuiView: GPUIView!
     private var displayLink: CADisplayLink?
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "GPUI Kit - TextView"
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .black
 
-        markdown = GPUITextView(frame: .zero)
-        markdown.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(markdown)
-        markdown.attach(to: self)
+        gpuiView = GPUIView(frame: .zero)
+        gpuiView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(gpuiView)
+        gpuiView.attach(to: self)
 
         NSLayoutConstraint.activate([
-            markdown.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            markdown.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            markdown.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            markdown.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+            gpuiView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            gpuiView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            gpuiView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            gpuiView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
         ])
 
     }
@@ -105,6 +104,6 @@ final class MarkdownContainerController: UIViewController {
         super.viewWillDisappear(animated)
     }
 
-    @objc private func renderFrame() { markdown.drawFrame() }
+    @objc private func renderFrame() { gpuiView.drawFrame() }
 
 }

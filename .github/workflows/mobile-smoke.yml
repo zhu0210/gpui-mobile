@@ -120,8 +120,8 @@ jobs:
           sim=$(xcrun simctl list devices available | grep -m1 "iPhone" | sed -E 's/.*\(([A-F0-9-]+)\).*/\1/')
           xcrun simctl boot "$sim"
           xcrun simctl bootstatus "$sim" -b
-          # Dark mode: the light sample must still get dark status bar text.
-          xcrun simctl ui "$sim" appearance dark
+          # Light mode: the dark menu must still get light status bar text.
+          xcrun simctl ui "$sim" appearance light
           xcrun simctl install "$sim" "$app"
           xcrun simctl launch "$sim" dev.gpui.mobile.example
           sleep 20
