@@ -25,7 +25,15 @@ const CLIPS: [(&str, &str, &[u8]); 2] = [
 
 thread_local! {
     static VIDEO: RefCell<Option<Result<VideoFrames, String>>> = const { RefCell::new(None) };
-    static CLIP: Cell<usize> = const { Cell::new(0) };
+    // Smoke tests pick the first clip with GPUI_VIDEO_CLIP, e.g. 1 for the
+    // rotated one.
+    static CLIP: Cell<usize> = Cell::new(
+        std::env::var("GPUI_VIDEO_CLIP")
+            .ok()
+            .and_then(|clip| clip.parse().ok())
+            .filter(|&clip| clip < CLIPS.len())
+            .unwrap_or(0),
+    );
 }
 
 fn open_clip(index: usize) -> Result<VideoFrames, String> {
