@@ -1754,7 +1754,28 @@ impl PlatformWindow for AndroidPlatformWindow {
                         gpui::TouchPhase::Cancelled => tap_start = None,
                     }
                 }
-                callback(event)
+                let typed = match &event {
+                    gpui::PlatformInput::KeyDown(key)
+                        if key.keystroke.modifiers.is_subset_of(&Modifiers::shift()) =>
+                    {
+                        key.keystroke.key_char.clone()
+                    }
+                    _ => None,
+                };
+                let result = callback(event);
+                // A key no binding took types its character, as on desktop: a hardware
+                // keyboard, or a soft keyboard that sends key events, reaches the input.
+                if let Some(text) = typed.filter(|_| result.propagate) {
+                    let handler = input_handler.borrow_mut().take();
+                    if let Some(mut handler) = handler {
+                        handler.replace_text_in_range(None, &text);
+                        let mut slot = input_handler.borrow_mut();
+                        if slot.is_none() {
+                            *slot = Some(handler);
+                        }
+                    }
+                }
+                result
             });
         // Bridge AndroidWindow touch/key callbacks → gpui::PlatformInput.
         //
