@@ -339,10 +339,11 @@ struct CMTime {
     epoch: i64,
 }
 
-// SAFETY: the field encodings match the C struct.
+// SAFETY: the field encodings match the C struct, which the runtime names
+// `?` (an anonymous struct behind a typedef).
 unsafe impl Encode for CMTime {
     const ENCODING: Encoding = Encoding::Struct(
-        "CMTime",
+        "?",
         &[Encoding::LongLong, Encoding::Int, Encoding::UInt, Encoding::LongLong],
     );
 }
