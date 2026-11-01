@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
 use gpui::{canvas, div, prelude::*, px, rgb, rgba, AnyElement, App, Corners, MouseDownEvent, Window};
-use gpui_mobile::media::VideoFrames;
+use gpui_mobile::media::{Source, VideoFrames};
 
 use super::{BLUE, GREEN, SUBTEXT, SURFACE0, TEXT};
 
@@ -23,6 +23,15 @@ const CLIPS: [(&str, &str, &[u8]); 2] = [
     ),
 ];
 
+/// The decoders to choose from: name and source.
+const SOURCES: &[(&str, Source)] = &[
+    ("Platform", Source::Platform),
+    #[cfg(feature = "ffmpeg")]
+    ("FFmpeg", Source::Ffmpeg),
+    #[cfg(feature = "ffmpeg")]
+    ("FFmpeg software", Source::FfmpegSoftware),
+];
+
 thread_local! {
     static VIDEO: RefCell<Option<Result<VideoFrames, String>>> = const { RefCell::new(None) };
     // Smoke tests pick the first clip with GPUI_VIDEO_CLIP, e.g. 1 for the
@@ -34,6 +43,14 @@ thread_local! {
             .filter(|&clip| clip < CLIPS.len())
             .unwrap_or(0),
     );
+    // And the decoder with GPUI_VIDEO_SOURCE, an index into SOURCES.
+    static SOURCE: Cell<usize> = Cell::new(
+        std::env::var("GPUI_VIDEO_SOURCE")
+            .ok()
+            .and_then(|source| source.parse().ok())
+            .filter(|&source| source < SOURCES.len())
+            .unwrap_or(0),
+    );
 }
 
 fn open_clip(index: usize) -> Result<VideoFrames, String> {
@@ -41,7 +58,8 @@ fn open_clip(index: usize) -> Result<VideoFrames, String> {
     let directory = gpui_mobile::packages::path_provider::cache_directory()?;
     let path = directory.join(name);
     std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
-    let video = VideoFrames::open(&path).map_err(|error| format!("{error:#}"))?;
+    let (_, source) = SOURCES[SOURCE.with(Cell::get)];
+    let video = VideoFrames::open_with(&path, source).map_err(|error| format!("{error:#}"))?;
     video.set_looping(true);
     Ok(video)
 }
@@ -119,6 +137,15 @@ pub fn render(_cx: &App) -> AnyElement {
         })
     });
 
+    let source = SOURCE.with(Cell::get);
+    let source_buttons = SOURCES.iter().enumerate().map(|(index, (name, _))| {
+        button(*name, if index == source { GREEN } else { SUBTEXT }, move |_, window, _| {
+            SOURCE.with(|source| source.set(index));
+            reset_state();
+            window.refresh();
+        })
+    });
+
     div()
         .flex()
         .flex_col()
@@ -130,11 +157,16 @@ pub fn render(_cx: &App) -> AnyElement {
                 .text_color(rgb(SUBTEXT))
                 .child(if cfg!(target_os = "ios") {
                     "Played by AVPlayer, each frame an IOSurface wrapped as a Metal texture and drawn as a GPUI image. No CPU copies."
-                } else {
+                } else if SOURCES[source].1 == Source::Platform {
                     "Decoded by MediaCodec into an AHardwareBuffer, imported into Vulkan and drawn as a GPUI image, paced by the AAudio clock. No CPU copies."
+                } else {
+                    "Demuxed by FFmpeg. Video through FFmpeg's MediaCodec decoder into the same AHardwareBuffer import, or decoded in software with the planes converted on the GPU; audio decoded by FFmpeg into AAudio."
                 }),
         )
         .child(div().flex().flex_wrap().gap_2().children(clip_buttons))
+        .when(SOURCES.len() > 1, |this| {
+            this.child(div().flex().flex_wrap().gap_2().children(source_buttons))
+        })
         .child(
             div()
                 .relative()
