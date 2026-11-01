@@ -1160,6 +1160,16 @@ pub fn move_task_to_back() {
     log::info!("move_task_to_back: {result:?}");
 }
 
+/// End the process without running `atexit` handlers or static destructors.
+///
+/// `std::process::exit` runs them, and the emulator's EGL driver aborts in its
+/// destructor; Android then treats the exit as a crash and may finish the
+/// Activity instead of restarting it.
+pub(crate) fn end_process() -> ! {
+    // SAFETY: `_exit` only ends the process; nothing runs after it.
+    unsafe { libc::_exit(0) }
+}
+
 /// Whether the destroyed Activity was finishing, rather than being recreated
 /// (a configuration or resource change). Set on `MainEvent::Destroy`.
 static ACTIVITY_FINISHING: AtomicBool = AtomicBool::new(true);
@@ -1419,7 +1429,7 @@ pub fn init_platform(app: &AndroidApp) -> &'static Arc<AndroidPlatform> {
     // must survive recreation use the host-driven path (`super::host`).
     if PLATFORM.get().is_some() {
         log::warn!("init_platform: second Activity in a live process — ending the process");
-        std::process::exit(0);
+        end_process();
     }
 
     let _ = ANDROID_APP.set(app.clone());
