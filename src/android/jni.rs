@@ -1196,6 +1196,16 @@ fn activity_is_finishing() -> Result<bool, String> {
     })
 }
 
+/// Whether the Activity is started (visible), between `MainEvent::Start` and
+/// `MainEvent::Stop`.
+static APP_VISIBLE: AtomicBool = AtomicBool::new(true);
+
+/// Whether the app is visible; media playback pauses while it isn't.
+#[cfg_attr(not(feature = "media"), allow(dead_code))]
+pub(crate) fn app_visible() -> bool {
+    APP_VISIBLE.load(Ordering::Relaxed)
+}
+
 /// Pause all platform views when the app goes to background.
 fn pause_platform_views() {
     let _ = with_env(|env| {
@@ -1293,10 +1303,12 @@ fn handle_main_event(_app: &AndroidApp, event: MainEvent<'_>) {
 
         MainEvent::Start => {
             log::info!("MainEvent::Start");
+            APP_VISIBLE.store(true, Ordering::Relaxed);
         }
 
         MainEvent::Stop => {
             log::info!("MainEvent::Stop");
+            APP_VISIBLE.store(false, Ordering::Relaxed);
         }
 
         MainEvent::SaveState { .. } => {

@@ -190,6 +190,8 @@ impl WgpuAtlas {
     /// Handles device lost by clearing all textures and cached tiles.
     /// The atlas will lazily recreate textures as needed on subsequent frames.
     pub fn handle_device_lost(&self, context: &WgpuContext) {
+        // External textures belong to the lost device; their owners register new ones.
+        EXTERNAL_TEXTURES.lock().clear();
         self.0.lock().clear(|textures| {
             textures.device = context.device.clone();
             textures.queue = context.queue.clone();
