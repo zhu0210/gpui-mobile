@@ -197,23 +197,9 @@ pub extern "C" fn gpui_ios_register_app() {
         nslog(&msg);
     }));
 
-    gpui_mobile::ios::ffi::set_app_callback(Box::new(|cx: &mut App| {
-        // Simulator smoke tests open a demo screen through the shared router
-        // instead of the Markdown sample, e.g.
-        // SIMCTL_CHILD_GPUI_INITIAL_SCREEN=native_video.
-        if std::env::var_os("GPUI_INITIAL_SCREEN").is_some() {
-            open_main_window(cx);
-            return;
-        }
-        gpui_kit::init(cx);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Light, None, cx);
-        screens::markdown::init(cx);
-        cx.open_window(WindowOptions::default(), |window, cx| {
-            let content = cx.new(|cx| screens::ai_chat::AiChat::new(window, cx));
-            cx.new(|cx| gpui_kit::component::Root::new(content, window, cx))
-        })
-        .expect("open embedded Markdown view");
-    }));
+    // The demo menu, as on Android. The chat sample stays in
+    // `screens::ai_chat` but is not a menu entry.
+    gpui_mobile::ios::ffi::set_app_callback(Box::new(open_main_window));
 }
 
 /// Convenience entry point for the binary target (`main.rs`).
