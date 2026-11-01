@@ -7,6 +7,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         let window = UIWindow(frame: UIScreen.main.bounds)
+        // The Markdown sample is light. Set it on the window, not one controller,
+        // so the navigation controller and the status bar follow it too; otherwise
+        // a device in dark mode draws white status bar text on the white page.
+        window.overrideUserInterfaceStyle = .light
         window.rootViewController = UINavigationController(rootViewController: MarkdownContainerController())
         window.makeKeyAndVisible()
         self.window = window
@@ -73,7 +77,6 @@ final class MarkdownContainerController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "GPUI Kit - TextView"
-        overrideUserInterfaceStyle = .light
         view.backgroundColor = .systemBackground
 
         markdown = GPUITextView(frame: .zero)
