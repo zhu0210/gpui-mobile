@@ -86,6 +86,8 @@ pub mod media;
 pub mod packages;
 pub mod platform_view;
 pub mod target_platform;
+pub mod touch_drags;
+pub use touch_drags::touch_drags;
 
 // ── System chrome (status bar / navigation bar) styling ──────────────────────
 
@@ -307,6 +309,21 @@ use std::sync::atomic::AtomicU32;
 /// Read with `keyboard_height()`.
 pub static KEYBOARD_HEIGHT_BITS: AtomicU32 = AtomicU32::new(0);
 
+static CARET_BOUNDS: std::sync::Mutex<Option<gpui::Bounds<gpui::Pixels>>> =
+    std::sync::Mutex::new(None);
+
+/// Where the focused input's caret was last drawn, in window coordinates, while
+/// the software keyboard is up. An app scrolls it above the keyboard with this.
+/// Android only for now; `None` elsewhere, or when no input has focus.
+pub fn caret_bounds() -> Option<gpui::Bounds<gpui::Pixels>> {
+    *CARET_BOUNDS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn set_caret_bounds(bounds: Option<gpui::Bounds<gpui::Pixels>>) {
+    *CARET_BOUNDS.lock().unwrap_or_else(|e| e.into_inner()) = bounds;
+}
+
 /// Get the current software keyboard height in logical points.
 ///
 /// Returns 0.0 when the keyboard is hidden.
@@ -319,6 +336,9 @@ pub fn set_keyboard_height(height: f32) {
     let prev = f32::from_bits(KEYBOARD_HEIGHT_BITS.load(Ordering::Relaxed));
     if (prev - height).abs() > 0.5 {
         KEYBOARD_HEIGHT_BITS.store(height.to_bits(), Ordering::Release);
+        if height <= 0.0 {
+            set_caret_bounds(None);
+        }
         mark_text_input_dirty();
     }
 }
@@ -328,9 +348,9 @@ pub fn set_keyboard_height(height: f32) {
 /// Query the safe area insets from the platform.
 ///
 /// Returns `(top, bottom, left, right)` in logical points.
-/// On iOS this queries `safeAreaInsets` from the UIView.
-/// On Android use the `AndroidWindow::safe_area_insets_logical()` method instead.
-/// On unsupported platforms returns zeros.
+/// On iOS this queries `safeAreaInsets` from the UIView; on Android, the primary
+/// window's insets (system bars and cutout; the keyboard is [`keyboard_height`]).
+/// On unsupported platforms, or before a window exists, returns zeros.
 pub fn safe_area_insets() -> (f32, f32, f32, f32) {
     #[cfg(target_os = "ios")]
     {
@@ -343,8 +363,13 @@ pub fn safe_area_insets() -> (f32, f32, f32, f32) {
             }
         }
     }
-    #[cfg(not(target_os = "ios"))]
-    {}
+    #[cfg(target_os = "android")]
+    {
+        if let Some(window) = android::jni::platform().and_then(|p| p.primary_window()) {
+            let insets = window.safe_area_insets_logical();
+            return (insets.top, insets.bottom, insets.left, insets.right);
+        }
+    }
     (0.0, 0.0, 0.0, 0.0)
 }
 

@@ -37,9 +37,9 @@ use futures::channel::oneshot;
 use gpui::{
     Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle,
     ForegroundExecutor, GestureTuning, KeybindingKeystroke, Keymap, Keystroke, Menu, MenuItem,
-    PathPromptOptions, Platform, PlatformDisplay, PlatformGestures, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, ScrollPhysics, Task, ThermalState,
-    WindowAppearance, WindowParams,
+    OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformGestures,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow,
+    ScrollPhysics, Task, ThermalState, WindowAppearance, WindowParams,
 };
 use gpui_wgpu::CosmicTextSystem;
 use parking_lot::Mutex;
@@ -223,6 +223,9 @@ pub struct AndroidPlatform {
     /// `appearance()` and costs no JNI call. Not in `state`: GPUI asks for it from
     /// main-thread tasks, which `flush_main_thread_tasks` runs with `state` locked.
     appearance: Mutex<super::window::WindowAppearance>,
+    /// The app's menus, for in-window menu bars; Android draws none of its own.
+    /// Not in `state`, for the same reason as `appearance`.
+    menus: Mutex<Vec<OwnedMenu>>,
 }
 
 /// Check whether a TrueType/OpenType font file contains CBDT (Color Bitmap
@@ -492,6 +495,7 @@ impl AndroidPlatform {
             }),
             should_quit: AtomicBool::new(false),
             appearance: Mutex::default(),
+            menus: Mutex::default(),
         }
     }
 
@@ -1327,8 +1331,13 @@ impl Platform for AndroidPlatform {
         // Android reports no display hot-plug configuration callback here; no-op.
     }
 
-    fn set_menus(&self, _menus: Vec<Menu>, _keymap: &Keymap) {
-        // No-op: Android doesn't have macOS-style menus.
+    fn set_menus(&self, menus: Vec<Menu>, _keymap: &Keymap) {
+        // Android has no menu bar; keep them for in-window menu bars.
+        *self.menus.lock() = menus.into_iter().map(Menu::owned).collect();
+    }
+
+    fn get_menus(&self) -> Option<Vec<OwnedMenu>> {
+        Some(self.menus.lock().clone())
     }
 
     fn set_dock_menu(&self, _menu: Vec<MenuItem>, _keymap: &Keymap) {
@@ -1607,6 +1616,9 @@ impl Platform for SharedPlatform {
     }
     fn set_menus(&self, menus: Vec<Menu>, keymap: &Keymap) {
         <AndroidPlatform as Platform>::set_menus(&self.0, menus, keymap)
+    }
+    fn get_menus(&self) -> Option<Vec<OwnedMenu>> {
+        <AndroidPlatform as Platform>::get_menus(&self.0)
     }
     fn set_dock_menu(&self, menu: Vec<MenuItem>, keymap: &Keymap) {
         <AndroidPlatform as Platform>::set_dock_menu(&self.0, menu, keymap)
