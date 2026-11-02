@@ -61,7 +61,7 @@ cd "$SRC"
     --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,vp9_superframe_split,extract_extradata \
     --enable-decoder=h264_mediacodec,hevc_mediacodec,vp9_mediacodec,av1_mediacodec \
     --enable-decoder=h264,hevc,vp9,aac,mp3,opus \
-    --enable-decoder=subrip,ass,ssa,webvtt,mov_text \
+    --enable-decoder=subrip,ass,ssa,webvtt,movtext \
     --enable-swresample --enable-swscale
 
 grep -E "^#define CONFIG_GPL 0" config.h
