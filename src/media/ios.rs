@@ -591,9 +591,11 @@ struct QueueBuffers {
     played_at: Option<i64>,
 }
 
-/// Buffers in the queue, and frames in each: about 85 ms ahead at 48 kHz.
+/// Buffers in the queue, and frames in each: about 340 ms ahead at 48 kHz,
+/// so a short hitch in decoding isn't heard. The clock follows what played,
+/// so the depth doesn't delay the picture.
 #[cfg(feature = "ffmpeg")]
-const QUEUE_BUFFERS: usize = 4;
+const QUEUE_BUFFERS: usize = 16;
 #[cfg(feature = "ffmpeg")]
 const QUEUE_BUFFER_FRAMES: usize = 1024;
 

@@ -163,18 +163,17 @@ impl VideoFrames {
     /// `playlist` and returns its bytes whole. AES-128 segments are decrypted
     /// here. URIs must be relative or plain paths: FFmpeg has no network
     /// protocols, so it refuses `http://` URIs before `fetch` sees them.
-    /// Each playback thread demuxes on its own, so `fetch` sees each segment
-    /// once per thread; cache in `fetch` to download it once.
+    /// `fetch` sees each URI once (the probe and playback threads share what
+    /// it returns), and the segments ahead of playback before they're needed;
+    /// a master playlist is narrowed to one variant up to 1080 p, unless its
+    /// audio is a rendition of its own.
     #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
     pub fn open_hls(
         playlist: &str,
         fetch: impl Fn(&str) -> std::io::Result<Vec<u8>> + Send + Sync + 'static,
         backend: Backend,
     ) -> anyhow::Result<Self> {
-        let origin = input::Origin::Hls {
-            playlist: playlist.to_owned(),
-            fetch: Arc::new(fetch),
-        };
+        let origin = input::hls(playlist, Arc::new(fetch));
         Self::open_source(Source::Ffmpeg(&origin), ffmpeg_backend(backend))
     }
 
