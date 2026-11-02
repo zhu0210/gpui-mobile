@@ -124,9 +124,12 @@ public class GpuiPlatformView {
 
                 // Create a container FrameLayout for this platform view
                 FrameLayout container = new FrameLayout(activity);
+                // An overlay (webview's `load_url`) has no element to size it: it fills the
+                // window right of and below its offsets.
+                boolean overlay = params.containsKey("overlay");
                 FrameLayout.LayoutParams layoutParams = new FrameLayout.LayoutParams(
-                    (int)(width * density),
-                    (int)(height * density)
+                    overlay ? ViewGroup.LayoutParams.MATCH_PARENT : (int)(width * density),
+                    overlay ? ViewGroup.LayoutParams.MATCH_PARENT : (int)(height * density)
                 );
                 layoutParams.leftMargin = (int)(x * density);
                 layoutParams.topMargin = (int)(y * density);
