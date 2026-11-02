@@ -304,6 +304,32 @@ impl IosPlatformView {
         Err("No GPUI window available to host platform view".to_string())
     }
 
+    /// Shows a view opened on its own, with no element to place it (`webview::load_url`): it
+    /// covers the window below `top`, above GPUI's content, and follows the window's size.
+    #[cfg(target_os = "ios")]
+    fn show_as_overlay(&self, top: f64) -> Result<(), String> {
+        let native_view = *self.native_view.lock().unwrap();
+        let window = super::ffi::IOS_WINDOW_LIST
+            .get()
+            .and_then(|wrapper| unsafe { (*wrapper.0.get()).last().copied() })
+            .filter(|window| !window.is_null())
+            .ok_or("No GPUI window available to host platform view")?;
+        unsafe {
+            let vc_view: *mut AnyObject = msg_send![(*window).view_controller_ptr(), view];
+            if vc_view.is_null() {
+                return Err("The GPUI window has no view".into());
+            }
+            let area: ObjcCGRect = msg_send![vc_view, bounds];
+            let frame = ObjcCGRect::new(0.0, top, area.width, (area.height - top).max(0.0));
+            let _: () = msg_send![native_view, setFrame: frame];
+            // UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight
+            let _: () = msg_send![native_view, setAutoresizingMask: 18_usize];
+            let _: () = msg_send![vc_view, addSubview: native_view];
+        }
+        self.inserted.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Update the native view's frame.
     #[cfg(target_os = "ios")]
     fn update_native_frame(&self, bounds: &PlatformViewBounds) {
@@ -423,6 +449,9 @@ impl PlatformViewFactory for IosPlatformViewFactory {
         #[cfg(target_os = "ios")]
         {
             let view = IosPlatformView::new(&self.view_type, params)?;
+            if params.creation_params.contains_key("overlay") {
+                view.show_as_overlay(params.bounds.y as f64)?;
+            }
             Ok(Box::new(view))
         }
         #[cfg(not(target_os = "ios"))]
