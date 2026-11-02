@@ -2,11 +2,12 @@
 //! VA-API, DMA-BUF imports, sound through cpal, GPUI drawn over the video.
 //!
 //! ```sh
-//! cargo run --example desktop_video --features ffmpeg -- [clip] [software]
+//! cargo run --example desktop_video --features ffmpeg -- [clip|hls] [software|reader]
 //! ```
 //!
-//! `clip` defaults to the bundled 60 s clip; `software` forces software
-//! decoding. `ZED_DEVICE_ID=0x<pci id>` picks the GPU.
+//! `clip` defaults to the bundled 60 s clip; `hls` plays the bundled AES-128
+//! HLS fixture through `open_hls`, every byte fetched by Rust. `software`
+//! forces software decoding; `reader` feeds the clip through `open_reader`. `ZED_DEVICE_ID=0x<pci id>` picks the GPU.
 
 use gpui::{
     canvas, div, prelude::*, px, rgb, rgba, size, App, Bounds, Context, Corners, Window,
@@ -63,7 +64,8 @@ fn main() {
     let clip = args.next().unwrap_or_else(|| {
         concat!(env!("CARGO_MANIFEST_DIR"), "/example/assets/video/av-60s-640x360.mp4").into()
     });
-    let backend = match args.next().as_deref() {
+    let mode = args.next();
+    let backend = match mode.as_deref() {
         Some("software") => Backend::FfmpegSoftware,
         _ => Backend::Ffmpeg,
     };
@@ -76,7 +78,25 @@ fn main() {
             },
             |_, cx| {
                 // Opened once the window has its GPU, so VA-API decodes on it.
-                let video = VideoFrames::open_with(&clip, backend).expect("opening the clip");
+                let video = match (clip.as_str(), mode.as_deref()) {
+                    ("hls", _) => {
+                        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/example/assets/video/hls");
+                        VideoFrames::open_hls(
+                            "clip.m3u8",
+                            move |uri| std::fs::read(std::path::Path::new(dir).join(uri)),
+                            backend,
+                        )
+                    }
+                    (_, Some("reader")) => {
+                        let clip = clip.clone();
+                        VideoFrames::open_reader(
+                            move || Ok(Box::new(std::fs::File::open(&clip)?) as Box<dyn gpui_mobile::media::ReadSeek>),
+                            backend,
+                        )
+                    }
+                    _ => VideoFrames::open_with(&clip, backend),
+                }
+                .expect("opening the clip");
                 video.set_looping(true);
                 let player = cx.new(|_| Player { video });
                 // The overlay's text changes as the video plays.

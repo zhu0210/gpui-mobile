@@ -13,10 +13,17 @@ enum Clip {
     /// A bundled file: its name and contents.
     Bundled(&'static str, &'static [u8]),
     Stream(&'static str),
+    /// Bundled bytes played through `VideoFrames::open_reader`.
+    #[cfg(feature = "ffmpeg")]
+    Reader(&'static [u8]),
+    /// A bundled AES-128 HLS stream whose playlist, key and segments Rust
+    /// serves to FFmpeg (`VideoFrames::open_hls`): name and contents.
+    #[cfg(feature = "ffmpeg")]
+    Hls(&'static [(&'static str, &'static [u8])]),
 }
 
 /// The sample clips, by button label.
-const CLIPS: [(&str, Clip); 3] = [
+const CLIPS: &[(&str, Clip)] = &[
     (
         "60 s with audio",
         Clip::Bundled("av-60s-640x360.mp4", include_bytes!("../../assets/video/av-60s-640x360.mp4")),
@@ -30,6 +37,22 @@ const CLIPS: [(&str, Clip); 3] = [
         // The bundled clip again, served over HTTPS by jsDelivr (as video/mp4,
         // with ranges; AVPlayer won't play GitHub raw's octet-stream).
         Clip::Stream("https://cdn.jsdelivr.net/gh/zhu0210/gpui-mobile@2a29d54/example/assets/video/av-60s-640x360.mp4"),
+    ),
+    #[cfg(feature = "ffmpeg")]
+    (
+        "Rust reader",
+        Clip::Reader(include_bytes!("../../assets/video/av-60s-640x360.mp4")),
+    ),
+    #[cfg(feature = "ffmpeg")]
+    (
+        "HLS from Rust",
+        Clip::Hls(&[
+            ("clip.m3u8", include_bytes!("../../assets/video/hls/clip.m3u8")),
+            ("clip.key", include_bytes!("../../assets/video/hls/clip.key")),
+            ("clip0.ts", include_bytes!("../../assets/video/hls/clip0.ts")),
+            ("clip1.ts", include_bytes!("../../assets/video/hls/clip1.ts")),
+            ("clip2.ts", include_bytes!("../../assets/video/hls/clip2.ts")),
+        ]),
     ),
 ];
 
@@ -74,6 +97,23 @@ fn open_clip(index: usize) -> Result<VideoFrames, String> {
         // ponytail: streams always use the platform player; FFmpeg here is
         // built without network (Cirrus will feed it through its own IO).
         Clip::Stream(url) => VideoFrames::open_url(url),
+        #[cfg(feature = "ffmpeg")]
+        Clip::Reader(bytes) => VideoFrames::open_reader(
+            move || Ok(Box::new(std::io::Cursor::new(bytes)) as Box<dyn gpui_mobile::media::ReadSeek>),
+            backend,
+        ),
+        #[cfg(feature = "ffmpeg")]
+        Clip::Hls(files) => VideoFrames::open_hls(
+            "clip.m3u8",
+            move |uri| {
+                let (_, bytes) = files
+                    .iter()
+                    .find(|(name, _)| *name == uri)
+                    .ok_or(std::io::ErrorKind::NotFound)?;
+                Ok(bytes.to_vec())
+            },
+            backend,
+        ),
     }
     .map_err(|error| format!("{error:#}"))?;
     video.set_looping(true);
@@ -173,7 +213,7 @@ pub fn render(_cx: &App) -> AnyElement {
                 .text_color(rgb(SUBTEXT))
                 .child(match (cfg!(target_os = "ios"), BACKENDS[backend].1 == Backend::Platform) {
                     (true, true) => "Played by AVPlayer, each frame an IOSurface wrapped as a Metal texture and drawn as a GPUI image. No CPU copies.",
-                    (true, false) => "Demuxed by FFmpeg. Video through VideoToolbox into BGRA IOSurfaces, the same Metal import as AVPlayer's, or decoded in software with the planes converted on the GPU. No sound yet.",
+                    (true, false) => "Demuxed by FFmpeg. Video through VideoToolbox into BGRA IOSurfaces, the same Metal import as AVPlayer's, or decoded in software with the planes converted on the GPU; audio decoded by FFmpeg into an AudioQueue.",
                     (false, true) => "Decoded by MediaCodec into an AHardwareBuffer, imported into Vulkan and drawn as a GPUI image, paced by the AAudio clock. No CPU copies.",
                     (false, false) => "Demuxed by FFmpeg. Video through FFmpeg's MediaCodec decoder into the same AHardwareBuffer import, or decoded in software with the planes converted on the GPU; audio decoded by FFmpeg into AAudio.",
                 }),
