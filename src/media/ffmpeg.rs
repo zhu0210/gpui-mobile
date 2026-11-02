@@ -12,8 +12,9 @@
 //! software and the planes are uploaded and converted on the GPU
 //! ([`super::planes`]).
 //!
-//! Each playback thread opens the file itself, like the platform source's
-//! extractors, so the threads share nothing but the clock.
+//! Each playback thread opens the input itself ([`super::input`]: a file, a
+//! Rust reader or Rust-fed HLS), like the platform source's extractors, so the
+//! threads share nothing but the clock.
 
 use super::player::{AudioOutput, AudioSource, VideoOutput, VideoSource};
 #[cfg(any(target_os = "ios", target_os = "linux"))]
@@ -24,14 +25,14 @@ use gpui::{DevicePixels, ImageId, Size};
 use std::cell::{Cell, RefCell};
 #[cfg(any(target_os = "ios", target_os = "linux"))]
 use std::time::{Duration, Instant};
+use super::input::{Opened, Origin};
 use super::planes::Picture;
 use anyhow::{anyhow, bail, Context as _, Result};
 use ffmpeg_next as ffmpeg;
 use ffmpeg::ffi;
-use ffmpeg::format::{context::Input, Pixel, Sample};
+use ffmpeg::format::{Pixel, Sample};
 #[cfg(target_os = "android")]
 use ndk_sys::ANativeWindow;
-use std::path::Path;
 use std::sync::{Arc, Mutex, Once, PoisonError};
 
 // `libavcodec/mediacodec.h`, which ffmpeg-sys-next doesn't bind.
@@ -43,7 +44,7 @@ extern "C" {
 /// Microseconds, FFmpeg's `AV_TIME_BASE`.
 const MICROS: ffmpeg::Rational = ffmpeg::Rational(1, 1_000_000);
 
-fn init() {
+pub(super) fn init() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         if let Err(error) = ffmpeg::init() {
@@ -52,9 +53,8 @@ fn init() {
     });
 }
 
-fn open_input(path: &Path) -> Result<Input> {
-    init();
-    ffmpeg::format::input(path).with_context(|| format!("FFmpeg opening {path:?}"))
+fn open_input(origin: &Origin) -> Result<Opened> {
+    super::input::open(origin).with_context(|| format!("FFmpeg opening {origin:?}"))
 }
 
 /// What the video stream needs before playback starts.
@@ -67,8 +67,8 @@ pub(super) struct VideoInfo {
     pub has_audio: bool,
 }
 
-pub(super) fn probe(path: &Path) -> Result<VideoInfo> {
-    let input = open_input(path)?;
+pub(super) fn probe(origin: &Origin) -> Result<VideoInfo> {
+    let input = open_input(origin)?;
     let stream = input
         .streams()
         .best(ffmpeg::media::Type::Video)
@@ -123,24 +123,33 @@ unsafe fn rotation(parameters: &ffi::AVCodecParameters) -> i32 {
 /// Reads packets of one stream and feeds them to a decoder; shared by the
 /// video and audio sources.
 struct Demuxer {
-    input: Input,
+    input: Opened,
     stream: usize,
     time_base: ffmpeg::Rational,
+    /// Where the input's timestamps start (1.4 s in MPEG-TS, so in HLS);
+    /// media time 0 is there.
+    start_us: i64,
     /// A packet the decoder had no room for yet.
     pending: Option<ffmpeg::Packet>,
     input_done: bool,
 }
 
 impl Demuxer {
-    fn open(path: &Path, kind: ffmpeg::media::Type) -> Result<(Self, ffmpeg::codec::Parameters)> {
-        let input = open_input(path)?;
+    fn open(origin: &Origin, kind: ffmpeg::media::Type) -> Result<(Self, ffmpeg::codec::Parameters)> {
+        let input = open_input(origin)?;
         let stream = input.streams().best(kind).ok_or_else(|| anyhow!("no {kind:?} stream"))?;
         let (index, time_base, parameters) = (stream.index(), stream.time_base(), stream.parameters());
+        // SAFETY: reads a field of the open input.
+        let start_us = match unsafe { (*input.as_ptr()).start_time } {
+            ffi::AV_NOPTS_VALUE => 0,
+            start => start,
+        };
         Ok((
             Self {
                 input,
                 stream: index,
                 time_base,
+                start_us,
                 pending: None,
                 input_done: false,
             },
@@ -184,7 +193,8 @@ impl Demuxer {
     fn seek(&mut self, target_us: i64, decoder: &mut ffmpeg::decoder::Opened) -> Result<()> {
         // The keyframe at or before the target; the playback loop drops what
         // comes before the target.
-        self.input.seek(target_us, ..target_us.saturating_add(1)).context("seeking")?;
+        let target = target_us.saturating_add(self.start_us);
+        self.input.seek(target, ..target.saturating_add(1)).context("seeking")?;
         decoder.flush();
         self.pending = None;
         self.input_done = false;
@@ -192,7 +202,7 @@ impl Demuxer {
     }
 
     fn micros(&self, timestamp: Option<i64>) -> i64 {
-        timestamp.map_or(0, |ts| ts.rescale(self.time_base, MICROS))
+        timestamp.map_or(0, |ts| ts.rescale(self.time_base, MICROS) - self.start_us)
     }
 }
 
@@ -234,11 +244,11 @@ impl FfmpegVideo {
     /// `hardware` is given and the decoder takes the stream, in software
     /// otherwise. Returns the source and whether it decodes in hardware.
     pub fn open(
-        path: &Path,
+        origin: &Origin,
         hardware: Option<HardwareTarget>,
         slot: Arc<Mutex<Option<Picture>>>,
     ) -> Result<(Self, bool)> {
-        let (demuxer, parameters) = Demuxer::open(path, ffmpeg::media::Type::Video)?;
+        let (demuxer, parameters) = Demuxer::open(origin, ffmpeg::media::Type::Video)?;
         let hardware = match hardware {
             Some(target) => match open_hardware(&parameters, demuxer.time_base, target) {
                 Ok(decoder) => Some(decoder),
@@ -604,8 +614,8 @@ pub(super) struct FfmpegAudio {
 unsafe impl Send for FfmpegAudio {}
 
 impl FfmpegAudio {
-    pub fn open(path: &Path) -> Result<Self> {
-        let (demuxer, parameters) = Demuxer::open(path, ffmpeg::media::Type::Audio)?;
+    pub fn open(origin: &Origin) -> Result<Self> {
+        let (demuxer, parameters) = Demuxer::open(origin, ffmpeg::media::Type::Audio)?;
         let mut context = ffmpeg::codec::Context::from_parameters(parameters)?;
         // SAFETY: the context is not open yet.
         unsafe { (*context.as_mut_ptr()).pkt_timebase = demuxer.time_base.into() };
@@ -740,27 +750,23 @@ pub(super) struct FfmpegPlayer<P: Platform> {
 #[cfg(any(target_os = "ios", target_os = "linux"))]
 impl<P: Platform> FfmpegPlayer<P> {
     pub fn open(source: super::Source, backend: super::Backend) -> Result<Self> {
-        use super::Source;
-        let Source::File(path) = source else {
-            // Built without network, as on Android.
-            bail!("the FFmpeg backend plays files only, not {source:?}");
-        };
-        let info = probe(path)?;
+        let origin = Origin::of(source)?;
+        let info = probe(&origin)?;
         let hardware = match backend {
             super::Backend::FfmpegSoftware => None,
             _ => P::hardware(P::context().as_ref()),
         };
         let slot = Arc::new(Mutex::new(None));
-        let (mut video, _) = FfmpegVideo::open(path, hardware, slot.clone())?;
+        let (mut video, _) = FfmpegVideo::open(&origin, hardware, slot.clone())?;
         let audio = if info.has_audio {
-            FfmpegAudio::open(path)
+            FfmpegAudio::open(&origin)
                 .map_err(|error| log::warn!("video: audio stream skipped: {error:#}"))
                 .ok()
         } else {
             None
         };
         log::info!(
-            "video: FFmpeg playing {}x{} (rotated {}°, audio {}) from {path:?}",
+            "video: FFmpeg playing {}x{} (rotated {}°, audio {}) from {origin:?}",
             info.width,
             info.height,
             info.rotation,
