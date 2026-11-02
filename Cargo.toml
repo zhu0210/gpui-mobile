@@ -49,7 +49,7 @@ microphone = []
 media_session = []
 # Render GPUI windows into images (`gpui_mobile::offscreen`). Needs the vendored
 # `gpui-pre-wgpu` (see `[patch.crates-io]`), which exposes its headless renderer.
-offscreen = ["gpui_wgpu/offscreen", "dep:image"]
+offscreen = ["gpui_wgpu?/offscreen", "dep:image"]
 # Video frames decoded by the platform and drawn in the GPUI scene without CPU
 # copies (`gpui_mobile::media`). Needs the vendored `gpui-pre-wgpu` too.
 media = ["dep:image"]
@@ -58,7 +58,7 @@ media = ["dep:image"]
 # Links FFmpeg's shared libraries: the system's on Linux (VA-API decoding);
 # for phones build them with `scripts/build-ffmpeg-android.sh` or
 # `scripts/build-ffmpeg-ios.sh` and set FFMPEG_DIR.
-ffmpeg = ["media", "dep:ffmpeg-next", "dep:cpal"]
+ffmpeg = ["media", "dep:ffmpeg-next", "dep:cpal", "dep:libc", "dep:gpui_wgpu"]
 
 [lib]
 name = "gpui_mobile"
@@ -118,11 +118,11 @@ ffmpeg-next = { version = "=9.0.0", optional = true, default-features = false, f
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The `media` clock reads CLOCK_MONOTONIC, like the audio timestamps.
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 # Audio output for the FFmpeg backend; also covers macOS and Windows later.
 cpal = { version = "0.16", optional = true }
 # The window's wgpu context and the external-texture hook (`media`).
-gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.10" }
+gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.10", optional = true }
 
 # ── Android ──────────────────────────────────────────────────────────────────
 
