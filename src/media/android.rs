@@ -114,23 +114,27 @@ impl Decoder {
             .spawn({
                 let shared = shared.clone();
                 move || {
-                    if let Err(error) = play_video(&video, &shared) {
-                        log::error!("video: decoding stopped: {error:#}");
-                    }
+                    attached(move || {
+                        if let Err(error) = play_video(&video, &shared) {
+                            log::error!("video: decoding stopped: {error:#}");
+                        }
+                    })
                 }
             })?];
         if let Some(audio) = audio {
             threads.push(std::thread::Builder::new().name("gpui-audio".into()).spawn({
                 let shared = shared.clone();
                 move || {
-                    if let Err(error) = play_audio(&audio, &shared) {
-                        log::error!("video: audio stopped: {error:#}");
-                    }
-                    // The video goes on by the monotonic clock.
-                    shared.update(|state| {
-                        state.audio = false;
-                        state.holding = false;
-                    });
+                    attached(move || {
+                        if let Err(error) = play_audio(&audio, &shared) {
+                            log::error!("video: audio stopped: {error:#}");
+                        }
+                        // The video goes on by the monotonic clock.
+                        shared.update(|state| {
+                            state.audio = false;
+                            state.holding = false;
+                        });
+                    })
                 }
             })?);
         }
@@ -441,6 +445,19 @@ impl Shared {
 
 /// Decodes video and renders each frame into the reader when the clock
 /// reaches it; drops late frames and, after a seek, those before the target.
+/// Runs a playback thread's body attached to the JVM. A URL extractor talks
+/// to the media server through Java binder objects, and deleting it (when the
+/// track drops at the end of `body`) aborts on a thread without a JNI env.
+fn attached(body: impl FnOnce()) {
+    let result = crate::android::jni::with_env(|_| {
+        body();
+        Ok(())
+    });
+    if let Err(error) = result {
+        log::error!("video: attaching the playback thread to the JVM failed: {error}");
+    }
+}
+
 fn play_video(track: &Track, shared: &Shared) -> Result<()> {
     let codec = track.codec.0.as_ptr();
     let (mut generation, mut target, mut input_done, mut first, mut last_us) = (0, 0, false, false, 0);
