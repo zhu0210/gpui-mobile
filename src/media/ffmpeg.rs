@@ -410,6 +410,11 @@ extern "C" fn pick_videotoolbox(
                     if ffi::av_hwframe_ctx_init(frames) >= 0 {
                         ffi::av_buffer_unref(&mut (*context).hw_frames_ctx);
                         (*context).hw_frames_ctx = frames;
+                        // FFmpeg maps BGRA to VideoToolbox only as full range
+                        // (RGB has no video range) and takes the range from
+                        // the context; VideoToolbox still reads the stream's
+                        // own range from the bitstream.
+                        (*context).color_range = ffi::AVColorRange::AVCOL_RANGE_JPEG;
                         return *format;
                     }
                     ffi::av_buffer_unref(&mut frames);
