@@ -1084,7 +1084,7 @@ impl Rescale for i64 {
 /// What a platform adds to [`FfmpegPlayer`]: the window's GPU, the import of
 /// hardware-decoded pictures, and the audio output.
 #[cfg(any(target_os = "ios", target_os = "linux"))]
-pub(super) trait Platform: Default {
+pub(super) trait Platform: Default + 'static {
     type Sink: AudioSink;
     /// How [`Platform::import`] gets frames to the GPU, for the log.
     const IMPORT: &str;
@@ -1306,13 +1306,22 @@ impl<P: Platform> FfmpegPlayer<P> {
 impl<P: Platform> Drop for FfmpegPlayer<P> {
     fn drop(&mut self) {
         self.shared.update(|state| state.stop = true);
-        for thread in self.threads.drain(..) {
-            if thread.join().is_err() {
-                log::error!("video: playback thread panicked");
+        // A playback thread may be waiting on a read (over the network, for a
+        // reader or HLS fetch) before it sees the stop: wait for it elsewhere,
+        // so the main thread doesn't.
+        let (threads, has_audio) = (std::mem::take(&mut self.threads), self.has_audio);
+        let stop = move || {
+            for thread in threads {
+                if thread.join().is_err() {
+                    log::error!("video: playback thread panicked");
+                }
             }
-        }
-        if self.has_audio {
-            P::audio_stopped();
+            if has_audio {
+                P::audio_stopped();
+            }
+        };
+        if let Err(error) = std::thread::Builder::new().name("gpui-video-stop".into()).spawn(stop) {
+            log::error!("video: the playback threads are left to stop alone: {error}");
         }
     }
 }

@@ -843,19 +843,21 @@ impl Drop for Player {
     }
 }
 
-thread_local! {
-    /// Live players, all on the main thread.
-    static PLAYERS: Cell<usize> = const { Cell::new(0) };
-}
+/// Live players. FFmpeg ones may open and close off the main thread
+/// ([`super::Detached`], `FfmpegPlayer::drop`); the lock keeps the session's
+/// setup and teardown in step with the count. AVAudioSession takes any thread.
+static PLAYERS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
 
 /// The default session category (SoloAmbient) is muted by the silent
 /// switch; video apps play through it, so the first player sets Playback.
 /// AVPlayer pauses itself when a call or Siri interrupts the session.
 fn audio_session_acquire() {
-    if PLAYERS.replace(PLAYERS.get() + 1) > 0 {
+    let mut players = PLAYERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *players += 1;
+    if *players > 1 {
         return;
     }
-    // SAFETY: the shared session and its constant strings, on the main thread.
+    // SAFETY: the shared session and its constant strings.
     unsafe {
         let session: *mut AnyObject = msg_send![class!(AVAudioSession), sharedInstance];
         let set: bool = msg_send![
@@ -874,10 +876,12 @@ fn audio_session_acquire() {
 
 /// After the last player, gives the audio back to other apps.
 fn audio_session_release() {
-    if PLAYERS.replace(PLAYERS.get().saturating_sub(1)) != 1 {
+    let mut players = PLAYERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *players = players.saturating_sub(1);
+    if *players > 0 {
         return;
     }
-    // SAFETY: the shared session, on the main thread.
+    // SAFETY: the shared session.
     unsafe {
         let session: *mut AnyObject = msg_send![class!(AVAudioSession), sharedInstance];
         let _: bool = msg_send![

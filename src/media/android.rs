@@ -44,7 +44,8 @@ const KEY_PCM_ENCODING: &CStr = c"pcm-encoding";
 const ENCODING_PCM_16BIT: i32 = 2;
 
 pub(super) struct Decoder {
-    reader: Reader,
+    /// Deleted after the playback threads stop (see `Drop`).
+    reader: std::mem::ManuallyDrop<Reader>,
     size: Size<DevicePixels>,
     rotation: i32,
     duration_us: i64,
@@ -201,7 +202,7 @@ impl Decoder {
         }
         let size = if rotation % 180 == 90 { (height, width) } else { (width, height) };
         Ok(Self {
-            reader,
+            reader: std::mem::ManuallyDrop::new(reader),
             size: Size {
                 width: DevicePixels(size.0),
                 height: DevicePixels(size.1),
@@ -383,10 +384,23 @@ impl Decoder {
 impl Drop for Decoder {
     fn drop(&mut self) {
         self.shared.update(|state| state.stop = true);
-        for thread in self.threads.drain(..) {
-            if thread.join().is_err() {
-                log::error!("video: playback thread panicked");
+        // A playback thread may be waiting on a read (over the network, for a
+        // reader or HLS fetch) before it sees the stop: wait for it elsewhere,
+        // so the main thread doesn't. The codecs write into the reader until
+        // the threads delete them, so it goes after them.
+        let threads = std::mem::take(&mut self.threads);
+        // SAFETY: taken once, here; the field isn't used after.
+        let reader = unsafe { std::mem::ManuallyDrop::take(&mut self.reader) };
+        let stop = move || {
+            for thread in threads {
+                if thread.join().is_err() {
+                    log::error!("video: playback thread panicked");
+                }
             }
+            drop(reader);
+        };
+        if let Err(error) = std::thread::Builder::new().name("gpui-video-stop".into()).spawn(stop) {
+            log::error!("video: the playback threads are left to stop alone: {error}");
         }
     }
 }
@@ -944,6 +958,10 @@ impl Reader {
         }
     }
 }
+
+// SAFETY: an `AImageReader` takes calls from any thread; it moves only to be
+// deleted after the playback threads (`Decoder::drop`).
+unsafe impl Send for Reader {}
 
 impl Drop for Reader {
     fn drop(&mut self) {
