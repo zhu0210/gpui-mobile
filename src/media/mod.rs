@@ -82,6 +82,49 @@ pub enum Backend {
     FfmpegSoftware,
 }
 
+/// A video an FFmpeg backend opened off the main thread.
+///
+/// Opening probes the input and opens its streams, reading from it each time:
+/// with a reader or HLS fetch that goes over the network, that blocks for as
+/// long as the reads take. Open on a background thread with
+/// [`Detached::open_reader`] or [`Detached::open_hls`] and hand the result to
+/// the main thread, where [`Detached::attach`] gives the [`VideoFrames`].
+/// Playback starts on open, as with [`VideoFrames::open_reader`].
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+pub struct Detached(VideoFrames);
+
+// SAFETY: an FFmpeg player holds no main-thread state until it is first
+// painted: its platform caches (texture cache, import pipeline, uploader) start
+// empty and are filled by `paint` on the main thread, and its playback threads
+// share only `Send` state with it.
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+unsafe impl Send for Detached {}
+
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+impl Detached {
+    /// [`VideoFrames::open_reader`], callable on any thread.
+    pub fn open_reader(
+        open: impl Fn() -> std::io::Result<Box<dyn ReadSeek>> + Send + Sync + 'static,
+        backend: Backend,
+    ) -> anyhow::Result<Self> {
+        VideoFrames::open_reader(open, backend).map(Self)
+    }
+
+    /// [`VideoFrames::open_hls`], callable on any thread.
+    pub fn open_hls(
+        playlist: &str,
+        fetch: impl Fn(&str) -> std::io::Result<Vec<u8>> + Send + Sync + 'static,
+        backend: Backend,
+    ) -> anyhow::Result<Self> {
+        VideoFrames::open_hls(playlist, fetch, backend).map(Self)
+    }
+
+    /// The video, to be used on the main thread from here on.
+    pub fn attach(self) -> VideoFrames {
+        self.0
+    }
+}
+
 impl VideoFrames {
     /// Opens a local video file and starts playing it with the platform's player.
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
