@@ -178,11 +178,16 @@ jobs:
           # FFmpeg (GPUI_VIDEO_BACKEND 1: VideoToolbox, 2: software), plain and rotated.
           # Clips 3 and 4: the 60 s clip through a Rust reader, and AES-128 HLS
           # whose playlist, key and segments Rust serves (open_reader, open_hls).
-          for run in "1 0 ffmpeg" "1 1 ffmpeg-rotated" "2 0 ffmpeg-software" "2 1 ffmpeg-software-rotated" "1 3 ffmpeg-reader" "1 4 ffmpeg-hls"; do
+          # Clip 5 (two audio and two subtitle tracks) with GPUI_VIDEO_CONTROLS: 1.5×,
+          # the second audio track, the first subtitles, frames capped at 120 px;
+          # through AVPlayer only the speed applies.
+          for run in "1 0 ffmpeg" "1 1 ffmpeg-rotated" "2 0 ffmpeg-software" "2 1 ffmpeg-software-rotated" "1 3 ffmpeg-reader" "1 4 ffmpeg-hls" "1 5 ffmpeg-tracks" "2 5 ffmpeg-software-tracks" "0 5 platform-tracks"; do
             read -r backend clip name <<<"$run"
+            controls=0
+            [ "$clip" = 5 ] && controls=1
             xcrun simctl terminate "$sim" dev.gpui.mobile.example || true
             SIMCTL_CHILD_GPUI_INITIAL_SCREEN=native_video SIMCTL_CHILD_GPUI_VIDEO_CLIP=$clip \
-              SIMCTL_CHILD_GPUI_VIDEO_BACKEND=$backend xcrun simctl launch \
+              SIMCTL_CHILD_GPUI_VIDEO_BACKEND=$backend SIMCTL_CHILD_GPUI_VIDEO_CONTROLS=$controls xcrun simctl launch \
               --stderr="$PWD/smoke/native-video-$name-stderr.txt" "$sim" dev.gpui.mobile.example
             sleep 15
             xcrun simctl io "$sim" screenshot "smoke/native-video-$name.png"
