@@ -235,6 +235,28 @@ pub enum KeyboardType {
     URL,
     /// Decimal number pad (digits and decimal point).
     Decimal,
+    /// A password: kept out of the keyboard's suggestions, and offered to password managers.
+    Password,
+    /// The user name or email address a password goes with, for password managers.
+    Username,
+}
+
+/// The keyboard the text input that gains focus next is shown with.
+static FOCUSED_KEYBOARD: std::sync::Mutex<KeyboardType> = std::sync::Mutex::new(KeyboardType::Default);
+
+/// Choose the keyboard for the text input gaining focus.
+///
+/// GPUI tells the platform only that some text input has focus, not what it is for. An app
+/// with a password field calls this with [`KeyboardType::Password`] from that field's focus
+/// event, which comes before the platform hears of the focus, and with
+/// [`KeyboardType::Default`] when it loses focus.
+pub fn set_focused_keyboard(keyboard_type: KeyboardType) {
+    *FOCUSED_KEYBOARD.lock().unwrap_or_else(|e| e.into_inner()) = keyboard_type;
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub(crate) fn focused_keyboard() -> KeyboardType {
+    *FOCUSED_KEYBOARD.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Show the software keyboard with the default keyboard type.

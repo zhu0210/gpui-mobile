@@ -1060,6 +1060,14 @@ impl IosWindow {
                 KeyboardType::NumberPad => 4,    // UIKeyboardTypeNumberPad
                 KeyboardType::URL => 3,          // UIKeyboardTypeURL
                 KeyboardType::Decimal => 8,      // UIKeyboardTypeDecimalPad
+                KeyboardType::Password => 1,     // UIKeyboardTypeASCIICapable
+                KeyboardType::Username => 7,     // UIKeyboardTypeEmailAddress
+            };
+            // UITextContentType: what AutoFill offers a password manager's entries for.
+            let content_type = match keyboard_type {
+                KeyboardType::Password => Some("password"),
+                KeyboardType::Username => Some("username"),
+                _ => None,
             };
             log::info!(
                 "GPUI iOS: text_input_view={:p}, setKeyboardType: {}",
@@ -1070,7 +1078,7 @@ impl IosWindow {
                 log::error!("GPUI iOS: text_input_view is NULL!");
                 return;
             }
-            super::text_input::configure_keyboard_traits(self.text_input_view, kb_type);
+            super::text_input::configure_keyboard_traits(self.text_input_view, kb_type, content_type);
             log::info!("GPUI iOS: scheduling becomeFirstResponder");
 
             // Defer becomeFirstResponder to the next run-loop iteration.
@@ -1469,7 +1477,7 @@ impl PlatformWindow for IosWindow {
     fn text_input_state_changed(&self, change: gpui::TextInputStateChange) {
         match change {
             gpui::TextInputStateChange::FocusGained => {
-                self.show_keyboard_with_type(crate::KeyboardType::Default)
+                self.show_keyboard_with_type(crate::focused_keyboard())
             }
             gpui::TextInputStateChange::FocusLost => self.hide_keyboard(),
             _ => {}

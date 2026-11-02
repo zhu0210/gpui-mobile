@@ -16,9 +16,13 @@ use gpui::{KeyDownEvent, Keystroke, Modifiers, PlatformInput};
 ///
 /// # Safety
 /// `view` must be a live UITextView, accessed on the UIKit main thread.
+///
+/// `content_type` is a `UITextContentType` (`"password"`, `"username"`), or `None` for plain
+/// text; it is set only where the view answers to it, since forwarding is not guaranteed.
 pub(super) unsafe fn configure_keyboard_traits(
     view: *mut objc2::runtime::AnyObject,
     keyboard_type: isize,
+    content_type: Option<&str>,
 ) {
     let send: unsafe extern "C-unwind" fn(
         *mut objc2::runtime::AnyObject,
@@ -29,6 +33,17 @@ pub(super) unsafe fn configure_keyboard_traits(
         send(view, objc2::sel!(setKeyboardType:), keyboard_type);
         send(view, objc2::sel!(setAutocorrectionType:), 1);
         send(view, objc2::sel!(setAutocapitalizationType:), 0);
+        let settable: objc2::runtime::Bool =
+            objc2::msg_send![view, respondsToSelector: objc2::sel!(setTextContentType:)];
+        if settable.as_bool() {
+            let value = content_type.map_or(std::ptr::null_mut(), |c| super::util::nsstring(c));
+            let set: unsafe extern "C-unwind" fn(
+                *mut objc2::runtime::AnyObject,
+                objc2::runtime::Sel,
+                *mut objc2::runtime::AnyObject,
+            ) = std::mem::transmute(objc2::ffi::objc_msgSend as unsafe extern "C-unwind" fn());
+            set(view, objc2::sel!(setTextContentType:), value);
+        }
     }
 }
 
