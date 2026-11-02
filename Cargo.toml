@@ -15,7 +15,7 @@ readme = "README.md"
 default = ["url_launcher", "shared_preferences", "path_provider",
            "package_info", "device_info", "connectivity", "network_info", "vibration",
            "battery", "share", "sensors", "webview", "file_selector", "image_picker", "camera",
-           "permission_handler", "notifications", "location", "audio", "video_player",
+           "permission_handler", "notifications", "location", "audio",
            "clipboard", "local_auth", "in_app_review", "contacts", "maps_launcher",
            "calendar", "deeplink", "microphone", "maps", "media_session"]
 url_launcher = []
@@ -37,7 +37,6 @@ permission_handler = []
 notifications = []
 location = []
 audio = []
-video_player = []
 clipboard = []
 local_auth = []
 in_app_review = []
@@ -54,7 +53,7 @@ offscreen = ["gpui_wgpu/offscreen", "dep:image"]
 # Video frames decoded by the platform and drawn in the GPUI scene without CPU
 # copies (`gpui_mobile::media`). Needs the vendored `gpui-pre-wgpu` too.
 media = ["dep:image"]
-# FFmpeg as a `media` source (`media::Source::Ffmpeg`): its demuxers, the
+# FFmpeg as a `media` source (`media::Backend::Ffmpeg`): its demuxers, the
 # platform decoder through FFmpeg's hwaccel, software decoding as the fallback.
 # Links FFmpeg's shared libraries; for Android build them with
 # `scripts/build-ffmpeg-android.sh` and set FFMPEG_DIR.

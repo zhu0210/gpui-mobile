@@ -5,31 +5,41 @@ use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
 use gpui::{canvas, div, prelude::*, px, rgb, rgba, AnyElement, App, Corners, MouseDownEvent, Window};
-use gpui_mobile::media::{Source, VideoFrames};
+use gpui_mobile::media::{Backend, VideoFrames};
 
 use super::{BLUE, GREEN, SUBTEXT, SURFACE0, TEXT};
 
-/// The sample clips: name, file name and contents.
-const CLIPS: [(&str, &str, &[u8]); 2] = [
+enum Clip {
+    /// A bundled file: its name and contents.
+    Bundled(&'static str, &'static [u8]),
+    Stream(&'static str),
+}
+
+/// The sample clips, by button label.
+const CLIPS: [(&str, Clip); 3] = [
     (
         "60 s with audio",
-        "av-60s-640x360.mp4",
-        include_bytes!("../../assets/video/av-60s-640x360.mp4"),
+        Clip::Bundled("av-60s-640x360.mp4", include_bytes!("../../assets/video/av-60s-640x360.mp4")),
     ),
     (
         "Rotated 90°",
-        "rotated-90.mp4",
-        include_bytes!("../../assets/video/rotated-90.mp4"),
+        Clip::Bundled("rotated-90.mp4", include_bytes!("../../assets/video/rotated-90.mp4")),
+    ),
+    (
+        "Stream",
+        // The bundled clip again, served over HTTPS by jsDelivr (as video/mp4,
+        // with ranges; AVPlayer won't play GitHub raw's octet-stream).
+        Clip::Stream("https://cdn.jsdelivr.net/gh/zhu0210/gpui-mobile@2a29d54/example/assets/video/av-60s-640x360.mp4"),
     ),
 ];
 
-/// The decoders to choose from: name and source.
-const SOURCES: &[(&str, Source)] = &[
-    ("Platform", Source::Platform),
+/// The decoders to choose from: name and backend.
+const BACKENDS: &[(&str, Backend)] = &[
+    ("Platform", Backend::Platform),
     #[cfg(feature = "ffmpeg")]
-    ("FFmpeg", Source::Ffmpeg),
+    ("FFmpeg", Backend::Ffmpeg),
     #[cfg(feature = "ffmpeg")]
-    ("FFmpeg software", Source::FfmpegSoftware),
+    ("FFmpeg software", Backend::FfmpegSoftware),
 ];
 
 thread_local! {
@@ -43,23 +53,29 @@ thread_local! {
             .filter(|&clip| clip < CLIPS.len())
             .unwrap_or(0),
     );
-    // And the decoder with GPUI_VIDEO_SOURCE, an index into SOURCES.
-    static SOURCE: Cell<usize> = Cell::new(
-        std::env::var("GPUI_VIDEO_SOURCE")
+    // And the decoder with GPUI_VIDEO_BACKEND, an index into BACKENDS.
+    static BACKEND: Cell<usize> = Cell::new(
+        std::env::var("GPUI_VIDEO_BACKEND")
             .ok()
-            .and_then(|source| source.parse().ok())
-            .filter(|&source| source < SOURCES.len())
+            .and_then(|backend| backend.parse().ok())
+            .filter(|&backend| backend < BACKENDS.len())
             .unwrap_or(0),
     );
 }
 
 fn open_clip(index: usize) -> Result<VideoFrames, String> {
-    let (_, name, bytes) = CLIPS[index];
-    let directory = gpui_mobile::packages::path_provider::cache_directory()?;
-    let path = directory.join(name);
-    std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
-    let (_, source) = SOURCES[SOURCE.with(Cell::get)];
-    let video = VideoFrames::open_with(&path, source).map_err(|error| format!("{error:#}"))?;
+    let (_, backend) = BACKENDS[BACKEND.with(Cell::get)];
+    let video = match CLIPS[index].1 {
+        Clip::Bundled(name, bytes) => {
+            let path = gpui_mobile::packages::path_provider::cache_directory()?.join(name);
+            std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+            VideoFrames::open_with(&path, backend)
+        }
+        // ponytail: streams always use the platform player; FFmpeg here is
+        // built without network (Cirrus will feed it through its own IO).
+        Clip::Stream(url) => VideoFrames::open_url(url),
+    }
+    .map_err(|error| format!("{error:#}"))?;
     video.set_looping(true);
     Ok(video)
 }
@@ -129,7 +145,7 @@ pub fn render(_cx: &App) -> AnyElement {
         16.0 / 9.0
     };
 
-    let clip_buttons = CLIPS.iter().enumerate().map(|(index, (name, _, _))| {
+    let clip_buttons = CLIPS.iter().enumerate().map(|(index, (name, _))| {
         button(*name, if index == clip { GREEN } else { SUBTEXT }, move |_, window, _| {
             CLIP.with(|clip| clip.set(index));
             reset_state();
@@ -137,10 +153,10 @@ pub fn render(_cx: &App) -> AnyElement {
         })
     });
 
-    let source = SOURCE.with(Cell::get);
-    let source_buttons = SOURCES.iter().enumerate().map(|(index, (name, _))| {
-        button(*name, if index == source { GREEN } else { SUBTEXT }, move |_, window, _| {
-            SOURCE.with(|source| source.set(index));
+    let backend = BACKEND.with(Cell::get);
+    let backend_buttons = BACKENDS.iter().enumerate().map(|(index, (name, _))| {
+        button(*name, if index == backend { GREEN } else { SUBTEXT }, move |_, window, _| {
+            BACKEND.with(|backend| backend.set(index));
             reset_state();
             window.refresh();
         })
@@ -157,15 +173,15 @@ pub fn render(_cx: &App) -> AnyElement {
                 .text_color(rgb(SUBTEXT))
                 .child(if cfg!(target_os = "ios") {
                     "Played by AVPlayer, each frame an IOSurface wrapped as a Metal texture and drawn as a GPUI image. No CPU copies."
-                } else if SOURCES[source].1 == Source::Platform {
+                } else if BACKENDS[backend].1 == Backend::Platform {
                     "Decoded by MediaCodec into an AHardwareBuffer, imported into Vulkan and drawn as a GPUI image, paced by the AAudio clock. No CPU copies."
                 } else {
                     "Demuxed by FFmpeg. Video through FFmpeg's MediaCodec decoder into the same AHardwareBuffer import, or decoded in software with the planes converted on the GPU; audio decoded by FFmpeg into AAudio."
                 }),
         )
         .child(div().flex().flex_wrap().gap_2().children(clip_buttons))
-        .when(SOURCES.len() > 1, |this| {
-            this.child(div().flex().flex_wrap().gap_2().children(source_buttons))
+        .when(BACKENDS.len() > 1, |this| {
+            this.child(div().flex().flex_wrap().gap_2().children(backend_buttons))
         })
         .child(
             div()

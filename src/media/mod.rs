@@ -1,8 +1,8 @@
 //! Video frames drawn inside the GPUI scene, decoded by the platform and
 //! imported on the GPU without CPU copies.
 //!
-//! Unlike `packages::video_player`, which shows a native view over the GPUI
-//! surface, these frames are ordinary scene content: they clip, round, layer
+//! Unlike a native view over the GPUI surface (the removed
+//! `packages::video_player`), these frames are ordinary scene content: they clip, round, layer
 //! and scroll like images, and GPUI can draw on top of them.
 //!
 //! Each frame is drawn through `Window::paint_image` with a placeholder
@@ -18,10 +18,10 @@
 //! - iOS: `AVPlayer` plays the file; an `AVPlayerItemVideoOutput` hands out
 //!   IOSurface-backed BGRA pixel buffers, wrapped as Metal textures through
 //!   `CVMetalTextureCache`.
-//! - FFmpeg ([`Source::Ffmpeg`], feature `ffmpeg`, Android for now): FFmpeg
+//! - FFmpeg ([`Backend::Ffmpeg`], feature `ffmpeg`, Android for now): FFmpeg
 //!   demuxes; video decodes through FFmpeg's MediaCodec decoders into the same
 //!   reader and import, or in software with the planes uploaded and converted
-//!   on the GPU ([`Source::FfmpegSoftware`] forces that); audio decodes in
+//!   on the GPU ([`Backend::FfmpegSoftware`] forces that); audio decodes in
 //!   software into AAudio.
 //!
 //! Feature-gated behind `media`.
@@ -56,7 +56,7 @@ pub struct VideoFrames {
 
 /// What decodes the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Source {
+pub enum Backend {
     /// The platform's player: `AMediaExtractor` + `AMediaCodec`, `AVPlayer`.
     #[default]
     Platform,
@@ -72,18 +72,31 @@ pub enum Source {
 impl VideoFrames {
     /// Opens a local video file and starts playing it with the platform's player.
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        Self::open_with(path, Source::Platform)
+        Self::open_source(Source::File(path.as_ref()), Backend::Platform)
     }
 
-    /// Opens a local video file and starts playing it, decoded by `source`.
-    pub fn open_with(path: impl AsRef<Path>, source: Source) -> anyhow::Result<Self> {
+    /// Opens a local video file and starts playing it, decoded by `backend`.
+    pub fn open_with(path: impl AsRef<Path>, backend: Backend) -> anyhow::Result<Self> {
+        Self::open_source(Source::File(path.as_ref()), backend)
+    }
+
+    /// Opens an `http(s)` URL and starts playing it as it streams in.
+    ///
+    /// On Android this connects before it returns, so call it off a
+    /// latency-sensitive path; on iOS it returns at once and the duration and
+    /// size are zero until the stream is ready.
+    pub fn open_url(url: &str) -> anyhow::Result<Self> {
+        Self::open_source(Source::Url(url), Backend::Platform)
+    }
+
+    fn open_source(source: Source, backend: Backend) -> anyhow::Result<Self> {
         #[cfg(target_os = "android")]
-        let inner = Decoder::open(path.as_ref(), source)?;
+        let inner = Decoder::open(source, backend)?;
         #[cfg(not(target_os = "android"))]
-        let inner = match source {
-            Source::Platform => Decoder::open(path.as_ref())?,
+        let inner = match backend {
+            Backend::Platform => Decoder::open(source)?,
             #[allow(unreachable_patterns)]
-            _ => anyhow::bail!("{source:?} is not implemented on this platform yet"),
+            _ => anyhow::bail!("{backend:?} is not implemented on this platform yet"),
         };
         // Drawn by the atlas only while no frame is registered (before the
         // first frame, or after a device loss until the next one).
@@ -235,6 +248,14 @@ fn yuv_to_rgb(bt709: bool, full_range: bool) -> [f32; 16] {
     ]
 }
 
+/// What a decoder plays.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
+enum Source<'a> {
+    File(&'a Path),
+    Url(&'a str),
+}
+
 /// Where no decoder exists yet: [`VideoFrames::open`] fails, so no value of
 /// this type is ever made.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -243,7 +264,7 @@ enum Decoder {}
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[allow(clippy::unused_self)]
 impl Decoder {
-    fn open(_path: &Path) -> anyhow::Result<Self> {
+    fn open(_source: Source) -> anyhow::Result<Self> {
         anyhow::bail!("video frames are only implemented on Android and iOS")
     }
     fn video_size(&self) -> Size<DevicePixels> {
