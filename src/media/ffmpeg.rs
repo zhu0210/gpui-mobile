@@ -15,16 +15,12 @@
 //! Each playback thread opens the file itself, like the platform source's
 //! extractors, so the threads share nothing but the clock.
 
-#[cfg(target_os = "android")]
-use super::android::{AudioOutput, AudioSource};
-use super::player::{VideoOutput, VideoSource};
+use super::player::{AudioOutput, AudioSource, VideoOutput, VideoSource};
 use super::planes::Picture;
 use anyhow::{anyhow, bail, Context as _, Result};
 use ffmpeg_next as ffmpeg;
 use ffmpeg::ffi;
-use ffmpeg::format::{context::Input, Pixel};
-#[cfg(target_os = "android")]
-use ffmpeg::format::Sample;
+use ffmpeg::format::{context::Input, Pixel, Sample};
 #[cfg(target_os = "android")]
 use ndk_sys::ANativeWindow;
 use std::path::Path;
@@ -369,6 +365,19 @@ fn open_hardware(
     time_base: ffmpeg::Rational,
     _target: HardwareTarget,
 ) -> Result<ffmpeg::decoder::Video> {
+    use ffmpeg::codec::Id;
+    // FFmpeg requires VideoToolbox's hardware decoder (the simulator has none).
+    let codec_type = match parameters.id() {
+        Id::H264 => *b"avc1",
+        Id::HEVC => *b"hvc1",
+        Id::VP9 => *b"vp09",
+        Id::AV1 => *b"av01",
+        id => bail!("no VideoToolbox decoder for {id:?}"),
+    };
+    // SAFETY: a plain query.
+    if !unsafe { VTIsHardwareDecodeSupported(u32::from_be_bytes(codec_type)) } {
+        bail!("no VideoToolbox hardware decoder for {:?}", parameters.id());
+    }
     let mut context = ffmpeg::codec::Context::from_parameters(parameters.clone())?;
     // SAFETY: the context is not open yet and takes the device reference.
     unsafe {
@@ -389,6 +398,12 @@ fn open_hardware(
         (*raw).get_format = Some(pick_videotoolbox);
     }
     Ok(context.decoder().video()?)
+}
+
+#[cfg(target_os = "ios")]
+#[link(name = "VideoToolbox", kind = "framework")]
+extern "C" {
+    fn VTIsHardwareDecodeSupported(codec_type: u32) -> bool;
 }
 
 /// Picks VideoToolbox, with BGRA frames so they take the same Metal import as
@@ -502,7 +517,6 @@ impl VideoSource for FfmpegVideo {
     }
 }
 
-#[cfg(target_os = "android")]
 pub(super) struct FfmpegAudio {
     demuxer: Demuxer,
     decoder: ffmpeg::decoder::Audio,
@@ -512,10 +526,8 @@ pub(super) struct FfmpegAudio {
 }
 
 // SAFETY: the source moves to its playback thread and is only used there.
-#[cfg(target_os = "android")]
 unsafe impl Send for FfmpegAudio {}
 
-#[cfg(target_os = "android")]
 impl FfmpegAudio {
     pub fn open(path: &Path) -> Result<Self> {
         let (demuxer, parameters) = Demuxer::open(path, ffmpeg::media::Type::Audio)?;
@@ -537,13 +549,12 @@ impl FfmpegAudio {
         })
     }
 
-    /// AAudio plays mono and stereo everywhere; more channels are downmixed.
+    /// Every output plays mono and stereo; more channels are downmixed.
     fn output_channels(&self) -> i32 {
         (self.decoder.channels() as i32).clamp(1, 2)
     }
 }
 
-#[cfg(target_os = "android")]
 impl AudioSource for FfmpegAudio {
     fn format(&self) -> Result<(i32, i32)> {
         Ok((self.decoder.rate() as i32, self.output_channels()))

@@ -68,6 +68,8 @@ targets:
           - "-framework WebKit"
           - "-framework CoreMedia"
           - "-framework AVFoundation"
+          - "-framework VideoToolbox"
+          - "-framework CoreVideo"
           - "-framework LocalAuthentication"
           - "-framework Contacts"
           - "-framework EventKit"

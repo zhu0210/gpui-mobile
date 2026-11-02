@@ -22,7 +22,9 @@ use ndk_sys as ffi;
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, CStr, CString};
 use std::os::fd::AsRawFd;
-use super::player::{monotonic_ns, play_video, Shared, VideoOutput, VideoSource, POLL};
+use super::player::{
+    monotonic_ns, play_audio, play_video, AudioOutput, AudioSink, AudioSource, Shared, VideoOutput, VideoSource, POLL,
+};
 use super::Source;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
@@ -35,8 +37,6 @@ use std::time::{Duration, Instant};
 /// and one in flight on the GPU.
 const MAX_IMAGES: i32 = 4;
 const DEQUEUE_TIMEOUT_US: i64 = 10_000;
-/// How long a seek waits for the audio stream's first timestamp.
-const HOLD_TIMEOUT: Duration = Duration::from_millis(500);
 /// Imported frames per drift report in the log.
 const DRIFT_REPORT_FRAMES: u32 = 300;
 /// `MediaFormat.KEY_ROTATION`, spelled out: the NDK constant needs API 28.
@@ -192,7 +192,7 @@ impl Decoder {
                 let shared = shared.clone();
                 move || {
                     attached(move || {
-                        if let Err(error) = play_audio(audio.as_mut(), &shared) {
+                        if let Err(error) = play_audio::<Stream>(audio.as_mut(), &shared) {
                             log::error!("video: audio stopped: {error:#}");
                         }
                         // The video goes on by the monotonic clock.
@@ -378,25 +378,6 @@ impl Drop for Decoder {
     }
 }
 
-/// What an audio source produced.
-pub(super) enum AudioOutput {
-    Pending,
-    End,
-    /// The output switched to this sample rate and channel count.
-    Format((i32, i32)),
-    /// Interleaved 16-bit samples, valid until `release`.
-    Samples { pts: i64, data: *const i16, frames: usize },
-}
-
-pub(super) trait AudioSource {
-    /// The sample rate and channel count before any `Format` output.
-    fn format(&self) -> Result<(i32, i32)>;
-    fn seek(&mut self, target_us: i64) -> Result<()>;
-    fn next(&mut self) -> Result<AudioOutput>;
-    /// Gives back the samples of the last `Samples` output.
-    fn release(&mut self) -> Result<()>;
-}
-
 /// Runs a playback thread's body attached to the JVM. A URL extractor talks
 /// to the media server through Java binder objects, and deleting it (when the
 /// track drops at the end of `body`) aborts on a thread without a JNI env.
@@ -407,107 +388,6 @@ fn attached(body: impl FnOnce()) {
     });
     if let Err(error) = result {
         log::error!("video: attaching the playback thread to the JVM failed: {error}");
-    }
-}
-
-/// Decodes audio and writes it to an AAudio stream, which paces the thread;
-/// the stream's timestamps drive the clock.
-fn play_audio(source: &mut dyn AudioSource, shared: &Shared) -> Result<()> {
-    let mut stream: Option<Stream> = None;
-    let (mut generation, mut target) = (0, 0);
-    // When the first samples since the last seek went to the stream.
-    let mut first_write: Option<Instant> = None;
-    // Frames written before the first sample since the last seek, and its time.
-    let mut base: Option<(i64, i64)> = None;
-    let mut end_us = 0;
-    loop {
-        let state = shared.lock();
-        if state.stop {
-            return Ok(());
-        }
-        if state.seek_generation != generation {
-            generation = state.seek_generation;
-            target = state.seek_target_us;
-            drop(state);
-            source.seek(target)?;
-            if let Some(stream) = &stream {
-                stream.pause_and_flush();
-            }
-            (first_write, base) = (None, None);
-            continue;
-        }
-        let (running, holding, finished) = (state.running, state.holding, state.audio_end_us.is_some());
-        if let Some(stream) = &stream {
-            stream.follow(state.wants_sound());
-        }
-        if (!running && !holding) || finished {
-            drop(shared.wait(state, POLL));
-            continue;
-        }
-        drop(state);
-
-        let (mut pts, data, frames) = match source.next()? {
-            AudioOutput::Pending => continue,
-            AudioOutput::Format((rate, channels)) => {
-                stream = Some(Stream::open(rate, channels)?);
-                continue;
-            }
-            AudioOutput::End => {
-                shared.update(|state| {
-                    if state.seek_generation == generation {
-                        state.audio_end_us = Some(end_us.max(target));
-                        state.holding = false;
-                    }
-                });
-                continue;
-            }
-            AudioOutput::Samples { pts, data, frames } => (pts, data, frames),
-        };
-        if stream.is_none() {
-            let (rate, channels) = source.format()?;
-            stream = Some(Stream::open(rate, channels)?);
-        }
-        let stream = stream.as_ref().ok_or_else(|| anyhow!("no audio stream"))?;
-        let (rate, channels) = (stream.rate as i64, stream.channels as usize);
-        let mut offset = 0;
-        if pts < target {
-            offset = (((target - pts) * rate / 1_000_000) as usize).min(frames);
-            pts += offset as i64 * 1_000_000 / rate;
-        }
-        if offset < frames {
-            let (base_frames, base_us) = *base.get_or_insert((stream.frames_written(), pts));
-            end_us = pts + (frames - offset) as i64 * 1_000_000 / rate;
-            while offset < frames {
-                let state = shared.lock();
-                if state.stop || state.seek_generation != generation {
-                    break;
-                }
-                let sound = state.wants_sound();
-                drop(state);
-                stream.follow(sound);
-                // Blocks while the stream's buffer is full, which paces this thread.
-                // SAFETY: the source keeps `frames` frames at `data` until `release`.
-                let written = unsafe { stream.write(data.add(offset * channels).cast(), frames - offset)? };
-                offset += written;
-                if written > 0 {
-                    first_write.get_or_insert_with(Instant::now);
-                }
-                // Without timestamps the clock starts on its own.
-                if first_write.is_some_and(|time| time.elapsed() > HOLD_TIMEOUT) {
-                    shared.update(|state| {
-                        if state.seek_generation == generation {
-                            state.holding = false;
-                        }
-                    });
-                }
-                if let Some((frame, time_ns)) = stream.timestamp() {
-                    if frame >= base_frames {
-                        shared.sync(generation, base_us + (frame - base_frames) * 1_000_000 / rate, time_ns);
-                    }
-                }
-            }
-        }
-        source.release()?;
     }
 }
 
@@ -861,8 +741,7 @@ struct Stream {
     started: Cell<bool>,
 }
 
-impl Stream {
-    /// Opens a stream of 16-bit PCM at `rate` with `channels` channels.
+impl AudioSink for Stream {
     fn open(rate: i32, channels: i32) -> Result<Self> {
         // SAFETY: the builder is deleted once, after opening; the stream it
         // opens is owned by the returned value.
@@ -886,7 +765,14 @@ impl Stream {
         }
     }
 
-    /// Starts or pauses the stream to match the clock.
+    fn rate(&self) -> i32 {
+        self.rate
+    }
+
+    fn channels(&self) -> i32 {
+        self.channels
+    }
+
     fn follow(&self, running: bool) {
         if running == self.started.get() {
             return;
@@ -902,7 +788,6 @@ impl Stream {
         self.started.set(running);
     }
 
-    /// Pauses the stream and drops what it has not played.
     fn pause_and_flush(&self) {
         self.follow(false);
         // SAFETY: the stream is live; flushing needs the pause to complete.
@@ -923,20 +808,15 @@ impl Stream {
         unsafe { ffi::AAudioStream_getFramesWritten(self.stream.as_ptr()) }
     }
 
-    /// Writes up to `frames` frames from `data`; returns how many it took.
-    ///
-    /// # Safety
-    /// `data` must hold `frames` frames of the stream's format.
-    unsafe fn write(&self, data: *const std::ffi::c_void, frames: usize) -> Result<usize> {
+    unsafe fn write(&self, data: *const i16, frames: usize) -> Result<usize> {
         // SAFETY: the stream is live; the caller vouches for `data`.
         let written = unsafe {
-            ffi::AAudioStream_write(self.stream.as_ptr(), data, frames as i32, POLL.as_nanos() as i64)
+            ffi::AAudioStream_write(self.stream.as_ptr(), data.cast(), frames as i32, POLL.as_nanos() as i64)
         };
         aaudio(written).context("AAudioStream_write")?;
         Ok(written as usize)
     }
 
-    /// The frame position last presented, and when, on the monotonic clock.
     fn timestamp(&self) -> Option<(i64, i64)> {
         let (mut frame, mut time) = (0, 0);
         // SAFETY: the stream is live; outputs are local.
