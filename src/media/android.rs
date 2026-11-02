@@ -180,23 +180,27 @@ impl Decoder {
             .spawn({
                 let shared = shared.clone();
                 move || {
-                    if let Err(error) = play_video(&mut video, &shared) {
-                        log::error!("video: decoding stopped: {error:#}");
-                    }
+                    attached(move || {
+                        if let Err(error) = play_video(&mut video, &shared) {
+                            log::error!("video: decoding stopped: {error:#}");
+                        }
+                    })
                 }
             })?];
         if let Some(mut audio) = audio {
             threads.push(std::thread::Builder::new().name("gpui-audio".into()).spawn({
                 let shared = shared.clone();
                 move || {
-                    if let Err(error) = play_audio(audio.as_mut(), &shared) {
-                        log::error!("video: audio stopped: {error:#}");
-                    }
-                    // The video goes on by the monotonic clock.
-                    shared.update(|state| {
-                        state.audio = false;
-                        state.holding = false;
-                    });
+                    attached(move || {
+                        if let Err(error) = play_audio(audio.as_mut(), &shared) {
+                            log::error!("video: audio stopped: {error:#}");
+                        }
+                        // The video goes on by the monotonic clock.
+                        shared.update(|state| {
+                            state.audio = false;
+                            state.holding = false;
+                        });
+                    })
                 }
             })?);
         }
@@ -391,6 +395,19 @@ pub(super) trait AudioSource {
     fn next(&mut self) -> Result<AudioOutput>;
     /// Gives back the samples of the last `Samples` output.
     fn release(&mut self) -> Result<()>;
+}
+
+/// Runs a playback thread's body attached to the JVM. A URL extractor talks
+/// to the media server through Java binder objects, and deleting it (when the
+/// track drops at the end of `body`) aborts on a thread without a JNI env.
+fn attached(body: impl FnOnce()) {
+    let result = crate::android::jni::with_env(|_| {
+        body();
+        Ok(())
+    });
+    if let Err(error) = result {
+        log::error!("video: attaching the playback thread to the JVM failed: {error}");
+    }
 }
 
 /// Decodes audio and writes it to an AAudio stream, which paces the thread;
