@@ -1,18 +1,18 @@
 //! FFmpeg's frames on the GPU. Software-decoded frames: the Y, U and V planes
 //! are uploaded as they are (1.5 bytes a pixel, not 4) and converted to RGBA
 //! by one render pass, with the stream's colour matrix and range and the
-//! display rotation. Imported RGB frames that need turning get the same pass
-//! without the conversion.
+//! display rotation. Imported two-plane frames (VA-API's NV12 and P010) get
+//! the same conversion from their Y and CbCr planes; imported RGB frames that
+//! need turning get the pass without it.
 
 use anyhow::{anyhow, Result};
 use gpui_wgpu::wgpu;
 use std::sync::Arc;
 
-/// A decoded frame waiting for the main thread: 8-bit 4:2:0 planes, or on iOS
-/// a VideoToolbox pixel buffer.
+/// A decoded frame waiting for the main thread: 8-bit 4:2:0 planes, or a
+/// VideoToolbox pixel buffer (iOS) or VA-API surface (Linux).
 pub(super) struct Picture {
     frame: ffmpeg_next::frame::Video,
-    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub timestamp_us: i64,
 }
 
@@ -31,6 +31,12 @@ impl Picture {
         (self.frame.format() == ffmpeg_next::format::Pixel::VIDEOTOOLBOX)
             .then(|| unsafe { (*self.frame.as_ptr()).data[3].cast() })
     }
+
+    /// The frame itself when it is a VA-API surface.
+    #[cfg(target_os = "linux")]
+    pub fn vaapi(&self) -> Option<&ffmpeg_next::frame::Video> {
+        (self.frame.format() == ffmpeg_next::format::Pixel::VAAPI).then_some(&self.frame)
+    }
 }
 
 const PLANES_SHADER: &str = r#"
@@ -45,6 +51,23 @@ struct Params { map_s: vec4<f32>, map_t: vec4<f32>, range: vec4<f32>, r: vec4<f3
     let st = vec2<f32>(dot(p.map_s.xy, in.uv) + p.map_s.z, dot(p.map_t.xy, in.uv) + p.map_t.z);
     let y = (textureSample(y_plane, smp, st).r - p.range.x) * p.range.y;
     let c = (vec2<f32>(textureSample(u_plane, smp, st).r, textureSample(v_plane, smp, st).r) - p.range.z) * p.range.w;
+    let v = vec4<f32>(y, c, 0.0);
+    return vec4<f32>(clamp(vec3<f32>(dot(p.r, v), dot(p.g, v), dot(p.b, v)), vec3(0.0), vec3(1.0)), 1.0);
+}
+"#;
+
+#[cfg(target_os = "linux")]
+const BIPLANAR_SHADER: &str = r#"
+struct Params { map_s: vec4<f32>, map_t: vec4<f32>, range: vec4<f32>, r: vec4<f32>, g: vec4<f32>, b: vec4<f32> };
+@group(0) @binding(0) var y_plane: texture_2d<f32>;
+@group(0) @binding(1) var uv_plane: texture_2d<f32>;
+@group(0) @binding(2) var smp: sampler;
+@group(0) @binding(3) var<uniform> p: Params;
+
+@fragment fn fs(in: Out) -> @location(0) vec4<f32> {
+    let st = vec2<f32>(dot(p.map_s.xy, in.uv) + p.map_s.z, dot(p.map_t.xy, in.uv) + p.map_t.z);
+    let y = (textureSample(y_plane, smp, st).r - p.range.x) * p.range.y;
+    let c = (textureSample(uv_plane, smp, st).rg - p.range.z) * p.range.w;
     let v = vec4<f32>(y, c, 0.0);
     return vec4<f32>(clamp(vec3<f32>(dot(p.r, v), dot(p.g, v), dot(p.b, v)), vec3(0.0), vec3(1.0)), 1.0);
 }
@@ -93,6 +116,8 @@ pub(super) struct Uploader {
     pipeline: Option<Pipeline>,
     planes: Option<Planes>,
     rotate: Option<Pipeline>,
+    #[cfg(target_os = "linux")]
+    biplanar: Option<Pipeline>,
 }
 
 impl Uploader {
@@ -149,22 +174,34 @@ impl Uploader {
             );
         }
 
-        let mapping = super::uv_mapping((0, 0, width, height), (width, height), rotation);
-        // SAFETY: reads plain colour fields of a live frame.
-        let (colorspace, range) = unsafe {
-            let raw = &*frame_ref.as_ptr();
-            (raw.colorspace, raw.color_range)
-        };
-        let colour = super::yuv_to_rgb(
-            colorspace == ffmpeg_next::ffi::AVColorSpace::AVCOL_SPC_BT709
-                || (colorspace == ffmpeg_next::ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED && height >= 720),
-            range == ffmpeg_next::ffi::AVColorRange::AVCOL_RANGE_JPEG,
-        );
-        let mut params = [0f32; 24];
-        params[..8].copy_from_slice(&mapping);
-        params[8..].copy_from_slice(&colour);
+        let params = conversion(frame_ref, rotation, false);
         let views: Vec<_> = planes.textures.iter().map(|t| t.create_view(&Default::default())).collect();
         Ok(pipeline.draw(&views, &params, rotated((width, height), rotation), device, queue))
+    }
+
+    /// Converts the imported Y and CbCr planes of `frame` (NV12, or P010 when
+    /// `ten_bit`) into a new RGBA8 texture, turned clockwise by `rotation`
+    /// degrees. Submits on `queue`.
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn convert_biplanar(
+        &mut self,
+        frame: &ffmpeg_next::frame::Video,
+        luma: &wgpu::Texture,
+        chroma: &wgpu::Texture,
+        ten_bit: bool,
+        rotation: i32,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Arc<wgpu::Texture>> {
+        if self.biplanar.as_ref().is_none_or(|p| &p.device != device) {
+            self.biplanar = Some(Pipeline::new(device, BIPLANAR_SHADER));
+        }
+        let pipeline = self.biplanar.as_ref().ok_or_else(|| anyhow!("no pipeline"))?;
+        let params = conversion(frame, rotation, ten_bit);
+        let views = [luma.create_view(&Default::default()), chroma.create_view(&Default::default())];
+        let size = (frame.width(), frame.height());
+        Ok(pipeline.draw(&views, &params, rotated(size, rotation), device, queue))
     }
 
     /// Draws `source` turned clockwise by `rotation` degrees into a new RGBA8
@@ -186,6 +223,35 @@ impl Uploader {
         let view = source.create_view(&Default::default());
         Ok(pipeline.draw(&[view], &params, rotated(size, rotation), device, queue))
     }
+}
+
+/// The planes shaders' uniform for `frame`: its uv mapping turned by
+/// `rotation`, then its colour conversion. `ten_bit` frames (P010) keep 10
+/// bits in the top of 16, so their levels are the 8-bit ones times 256/65535.
+fn conversion(frame: &ffmpeg_next::frame::Video, rotation: i32, ten_bit: bool) -> [f32; 24] {
+    let (width, height) = (frame.width(), frame.height());
+    let mapping = super::uv_mapping((0, 0, width, height), (width, height), rotation);
+    // SAFETY: reads plain colour fields of a live frame.
+    let (colorspace, range) = unsafe {
+        let raw = &*frame.as_ptr();
+        (raw.colorspace, raw.color_range)
+    };
+    let mut colour = super::yuv_to_rgb(
+        colorspace == ffmpeg_next::ffi::AVColorSpace::AVCOL_SPC_BT709
+            || (colorspace == ffmpeg_next::ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED && height >= 720),
+        range == ffmpeg_next::ffi::AVColorRange::AVCOL_RANGE_JPEG,
+    );
+    if ten_bit {
+        let k = 255.0 * 256.0 / 65535.0;
+        colour[0] *= k;
+        colour[1] /= k;
+        colour[2] *= k;
+        colour[3] /= k;
+    }
+    let mut params = [0f32; 24];
+    params[..8].copy_from_slice(&mapping);
+    params[8..].copy_from_slice(&colour);
+    params
 }
 
 /// `size` turned by `rotation` degrees.

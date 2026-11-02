@@ -24,7 +24,10 @@
 //!   - Android: through FFmpeg's MediaCodec decoders into the same reader and
 //!     import; audio decodes in software into AAudio.
 //!   - iOS: through VideoToolbox into BGRA pixel buffers, taking the same
-//!     Metal import as `AVPlayer`'s; no sound yet.
+//!     Metal import as `AVPlayer`'s; audio into an AudioQueue.
+//!   - Linux (the only backend there; [`Backend::Platform`] means FFmpeg too):
+//!     through VA-API on the window's GPU, each surface imported into Vulkan
+//!     as DMA-BUF planes and converted to RGBA; audio through cpal.
 //!
 //! Feature-gated behind `media`.
 
@@ -36,11 +39,15 @@ use android::Decoder;
 mod ios;
 #[cfg(target_os = "ios")]
 use ios::Decoder;
-#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios")))]
+#[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+mod linux;
+#[cfg(all(feature = "ffmpeg", target_os = "linux"))]
+use linux::Decoder;
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
 mod ffmpeg;
-#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios")))]
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
 mod planes;
-#[cfg(any(target_os = "android", all(feature = "ffmpeg", target_os = "ios")))]
+#[cfg(any(target_os = "android", all(feature = "ffmpeg", any(target_os = "ios", target_os = "linux"))))]
 mod player;
 
 use gpui::{px, size, Bounds, Corners, DevicePixels, Pixels, RenderImage, Size, Window};
@@ -170,7 +177,7 @@ impl VideoFrames {
 
 impl Drop for VideoFrames {
     fn drop(&mut self) {
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", target_os = "linux")))]
         gpui_wgpu::remove_external_texture(self.image.id);
     }
 }
@@ -190,7 +197,10 @@ fn contain(bounds: Bounds<Pixels>, content: Size<DevicePixels>) -> Bounds<Pixels
 /// one, to normalised buffer coordinates, so the output shows the `crop`
 /// rectangle (x, y, width, height) of a `buffer`-sized image turned clockwise
 /// by `rotation` degrees.
-#[cfg_attr(not(any(target_os = "android", all(feature = "ffmpeg", target_os = "ios"))), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "android", all(feature = "ffmpeg", any(target_os = "ios", target_os = "linux")))),
+    allow(dead_code)
+)]
 fn uv_mapping(crop: (i32, i32, u32, u32), buffer: (u32, u32), rotation: i32) -> [f32; 8] {
     // Crop-relative source coordinates (s, t) = (a·u + b·v + c, d·u + e·v + f).
     let [a, b, c, d, e, f] = match rotation {
@@ -216,7 +226,10 @@ fn uv_mapping(crop: (i32, i32, u32, u32), buffer: (u32, u32), rotation: i32) -> 
 /// The YCbCr → RGB conversion for 8-bit video, as the planes shader takes
 /// it: (Y offset, Y scale, chroma offset, chroma scale), then the R, G and B
 /// rows applied to (Y, Cb, Cr, 0). BT.709 or BT.601, limited or full range.
-#[cfg_attr(not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios"))), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux"))),
+    allow(dead_code)
+)]
 fn yuv_to_rgb(bt709: bool, full_range: bool) -> [f32; 16] {
     let (kr, kb) = if bt709 { (0.2126, 0.0722) } else { (0.299, 0.114) };
     let kg = 1.0 - kr - kb;
@@ -247,22 +260,27 @@ fn yuv_to_rgb(bt709: bool, full_range: bool) -> [f32; 16] {
 
 /// What a decoder plays.
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", target_os = "linux"))),
+    allow(dead_code)
+)]
 enum Source<'a> {
     File(&'a Path),
+    // The FFmpeg player, all Linux has, opens files only.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Url(&'a str),
 }
 
 /// Where no decoder exists yet: [`VideoFrames::open`] fails, so no value of
 /// this type is ever made.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", target_os = "linux"))))]
 enum Decoder {}
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", target_os = "linux"))))]
 #[allow(clippy::unused_self)]
 impl Decoder {
     fn open(_source: Source, _backend: Backend) -> anyhow::Result<Self> {
-        anyhow::bail!("video frames are only implemented on Android and iOS")
+        anyhow::bail!("video frames are only implemented on Android, iOS and Linux (with `ffmpeg`)")
     }
     fn video_size(&self) -> Size<DevicePixels> {
         match *self {}

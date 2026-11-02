@@ -55,10 +55,10 @@ offscreen = ["gpui_wgpu/offscreen", "dep:image"]
 media = ["dep:image"]
 # FFmpeg as a `media` source (`media::Backend::Ffmpeg`): its demuxers, the
 # platform decoder through FFmpeg's hwaccel, software decoding as the fallback.
-# Links FFmpeg's shared libraries: build them with
-# `scripts/build-ffmpeg-android.sh` or `scripts/build-ffmpeg-ios.sh` and set
-# FFMPEG_DIR.
-ffmpeg = ["media", "dep:ffmpeg-next"]
+# Links FFmpeg's shared libraries: the system's on Linux (VA-API decoding);
+# for phones build them with `scripts/build-ffmpeg-android.sh` or
+# `scripts/build-ffmpeg-ios.sh` and set FFMPEG_DIR.
+ffmpeg = ["media", "dep:ffmpeg-next", "dep:cpal"]
 
 [lib]
 name = "gpui_mobile"
@@ -110,9 +110,19 @@ smallvec            = { version = "1.6", features = ["union", "const_new"] }
 # font-kit (same registry package as gpui-pre-wgpu)
 font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
 
-[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+[target.'cfg(any(target_os = "android", target_os = "ios", target_os = "linux"))'.dependencies]
 # FFmpeg for `media` (feature `ffmpeg`): LGPL shared libraries, no avdevice/avfilter.
 ffmpeg-next = { version = "=9.0.0", optional = true, default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
+
+# ── Linux desktop (`media` with `ffmpeg`) ────────────────────────────────────
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The `media` clock reads CLOCK_MONOTONIC, like the audio timestamps.
+libc = "0.2"
+# Audio output for the FFmpeg backend; also covers macOS and Windows later.
+cpal = { version = "0.16", optional = true }
+# The window's wgpu context and the external-texture hook (`media`).
+gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.10" }
 
 # ── Android ──────────────────────────────────────────────────────────────────
 
@@ -150,6 +160,15 @@ uuid       = { version = "1", features = ["v5"] }
 
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false, features = ["test-support"] }
+
+# `examples/desktop_video.rs`: a desktop GPUI window.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["wayland", "x11"] }
+env_logger = "0.11"
+
+[[example]]
+name = "desktop_video"
+required-features = ["ffmpeg"]
 
 # ── profiles ─────────────────────────────────────────────────────────────────
 
