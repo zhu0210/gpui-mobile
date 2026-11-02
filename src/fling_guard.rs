@@ -27,9 +27,14 @@
 //!
 //! The recognizer's momentum is not visible from the platform, so the guard
 //! estimates it: momentum can only follow the release of a contact that
-//! panned, and no fling in either physics outlives [`MOMENTUM_WINDOW`]. What
-//! the guard cannot restore is the catching contact's no-tap rule: a contact
-//! that stops a fling and lifts without moving is an ordinary tap here.
+//! panned, and no fling in either physics outlives [`MOMENTUM_WINDOW`].
+//!
+//! Disarming the fling also loses the catching contact's no-tap rule: the
+//! real contact begins on an idle recognizer, so one that stops the content
+//! and lifts without moving would be a tap on whatever it stopped over. The
+//! guard keeps the rule itself: it estimates how fast the content still
+//! coasts from the release speed, and a contact that lands while it visibly
+//! does and lifts without panning is relayed as cancelled.
 //!
 //! Main thread only, like everything in GPUI.
 
@@ -44,6 +49,16 @@ use gpui::{px, Pixels, Point, TouchEvent, TouchId, TouchPhase};
 /// its 8000 px/s cap to a stop; Android's spline is shorter.
 const MOMENTUM_WINDOW: Duration = Duration::from_secs(4);
 
+/// Coasting slower than this (pixels per second) looks stopped: a contact
+/// landing then is a tap.
+const STILL_SPEED: f32 = 100.;
+
+/// A release this long after the last movement is a stopped finger: no fling.
+const STOPPED_GAP: Duration = Duration::from_millis(50);
+
+/// The recognizer's cap on fling speed, in pixels per second.
+const MAX_FLING_SPEED: f32 = 8000.;
+
 /// The recognizer's touch slop: a contact that moved past it panned and may
 /// have flung on release; one that did not was a tap or a long press.
 const PAN_SLOP: Pixels = px(8.);
@@ -56,11 +71,39 @@ pub(crate) struct FlingGuard {
     contacts: HashMap<TouchId, Contact>,
     /// Momentum may be running until this instant.
     momentum_until: Option<Instant>,
+    /// When the last pan was released, and how fast.
+    fling: Option<(Instant, f32)>,
 }
 
 struct Contact {
     start: Point<Pixels>,
     panned: bool,
+    /// It landed while the content visibly coasted: lifting it without
+    /// panning only stops the content.
+    caught: bool,
+    /// The two latest movement samples, at least [`STOPPED_GAP`] apart when
+    /// there are enough, for the release speed.
+    from: (Point<Pixels>, Instant),
+    last: (Point<Pixels>, Instant),
+}
+
+impl Contact {
+    fn release_speed(&self, now: Instant) -> f32 {
+        let dt = self.last.1.duration_since(self.from.1).as_secs_f32();
+        if dt == 0. || now.duration_since(self.last.1) > STOPPED_GAP {
+            return 0.;
+        }
+        (self.last.0 - self.from.0).magnitude() as f32 / dt
+    }
+}
+
+/// How fast a fling released at `speed` still coasts `elapsed` later, by
+/// iOS's exponential decay.
+// ponytail: Android's friction spline stops sooner than this, so a tap there
+// just after a fling dies may still be taken for a catch; model the spline if
+// that is noticed.
+fn coasting(speed: f32, elapsed: Duration) -> f32 {
+    speed * 0.998f32.powf(elapsed.as_secs_f32() * 1000.)
 }
 
 impl FlingGuard {
@@ -68,6 +111,7 @@ impl FlingGuard {
         Self {
             contacts: HashMap::new(),
             momentum_until: None,
+            fling: None,
         }
     }
 
@@ -103,11 +147,17 @@ impl FlingGuard {
                         });
                     }
                 }
+                let caught = self.fling.take().is_some_and(|(at, speed)| {
+                    coasting(speed, now.duration_since(at)) > STILL_SPEED
+                });
                 self.contacts.insert(
                     event.id,
                     Contact {
                         start: event.position,
                         panned: false,
+                        caught,
+                        from: (event.position, now),
+                        last: (event.position, now),
                     },
                 );
             }
@@ -117,17 +167,27 @@ impl FlingGuard {
                         let travelled = event.position - contact.start;
                         contact.panned = travelled.magnitude() > f64::from(PAN_SLOP);
                     }
+                    if now.duration_since(contact.from.1) > STOPPED_GAP {
+                        contact.from = contact.last;
+                    }
+                    contact.last = (event.position, now);
                 }
             }
-            TouchPhase::Ended => {
-                if self
-                    .contacts
-                    .remove(&event.id)
-                    .is_some_and(|contact| contact.panned)
-                {
+            TouchPhase::Ended => match self.contacts.remove(&event.id) {
+                Some(contact) if contact.panned => {
                     self.momentum_until = Some(now + MOMENTUM_WINDOW);
+                    let speed = contact.release_speed(now).min(MAX_FLING_SPEED);
+                    self.fling = Some((now, speed));
                 }
-            }
+                Some(contact) if contact.caught => {
+                    emit(TouchEvent {
+                        phase: TouchPhase::Cancelled,
+                        ..event
+                    });
+                    return;
+                }
+                _ => {}
+            },
             // A cancelled pan never flings.
             TouchPhase::Cancelled => {
                 self.contacts.remove(&event.id);
@@ -305,6 +365,102 @@ mod tests {
             relayed,
             [(2, TouchPhase::Started, point(px(300.), px(300.)))]
         );
+    }
+
+    /// A fast upward swipe, one movement every 10 ms, released at `now`:
+    /// about 4000 px/s.
+    fn swipe(guard: &mut FlingGuard, now: Instant) {
+        let start = now - Duration::from_millis(60);
+        for step in 0..=6u64 {
+            let phase = if step == 0 {
+                TouchPhase::Started
+            } else {
+                TouchPhase::Moved
+            };
+            relay_at_time(
+                guard,
+                start + Duration::from_millis(step * 10),
+                touch(1, phase, 50., 400. - 40. * step as f32),
+            );
+        }
+        relay_at_time(guard, now, touch(1, TouchPhase::Ended, 50., 160.));
+    }
+
+    fn relay_at_time(guard: &mut FlingGuard, now: Instant, event: TouchEvent) -> Vec<TouchPhase> {
+        let mut out = Vec::new();
+        guard.relay_at(event, now, || TouchId(100), &mut |event| {
+            out.push(event.phase)
+        });
+        out
+    }
+
+    #[test]
+    fn a_contact_that_stops_coasting_content_is_not_a_tap() {
+        let mut guard = FlingGuard::new();
+        let now = Instant::now();
+        swipe(&mut guard, now);
+
+        let at = now + Duration::from_millis(500);
+        relay_at_time(&mut guard, at, touch(2, TouchPhase::Started, 50., 200.));
+        let lifted = relay_at_time(
+            &mut guard,
+            at + Duration::from_millis(80),
+            touch(2, TouchPhase::Ended, 50., 200.),
+        );
+        assert_eq!(lifted, [TouchPhase::Cancelled]);
+
+        // The content stopped: the next contact is a tap again.
+        let at = at + Duration::from_millis(300);
+        relay_at_time(&mut guard, at, touch(3, TouchPhase::Started, 50., 200.));
+        let lifted = relay_at_time(
+            &mut guard,
+            at + Duration::from_millis(80),
+            touch(3, TouchPhase::Ended, 50., 200.),
+        );
+        assert_eq!(lifted, [TouchPhase::Ended]);
+    }
+
+    #[test]
+    fn a_contact_after_the_coasting_dies_down_is_a_tap() {
+        let mut guard = FlingGuard::new();
+        let now = Instant::now();
+        swipe(&mut guard, now);
+
+        let at = now + Duration::from_secs(3);
+        relay_at_time(&mut guard, at, touch(2, TouchPhase::Started, 50., 200.));
+        let lifted = relay_at_time(
+            &mut guard,
+            at + Duration::from_millis(80),
+            touch(2, TouchPhase::Ended, 50., 200.),
+        );
+        assert_eq!(lifted, [TouchPhase::Ended]);
+    }
+
+    #[test]
+    fn a_pan_released_still_does_not_catch_the_next_contact() {
+        let mut guard = FlingGuard::new();
+        let now = Instant::now();
+        relay_at_time(&mut guard, now, touch(1, TouchPhase::Started, 50., 400.));
+        relay_at_time(
+            &mut guard,
+            now + Duration::from_millis(30),
+            touch(1, TouchPhase::Moved, 50., 200.),
+        );
+        // The finger stopped long before lifting: nothing flings.
+        relay_at_time(
+            &mut guard,
+            now + Duration::from_millis(300),
+            touch(1, TouchPhase::Ended, 50., 200.),
+        );
+
+        let at = now + Duration::from_millis(400);
+        relay_at_time(&mut guard, at, touch(2, TouchPhase::Started, 50., 200.));
+        let lifted = relay_at_time(
+            &mut guard,
+            at + Duration::from_millis(80),
+            touch(2, TouchPhase::Ended, 50., 200.),
+        );
+        assert_eq!(lifted, [TouchPhase::Ended]);
     }
 
     /// The guard's purpose, end to end: GPUI's recognizer never offers a
