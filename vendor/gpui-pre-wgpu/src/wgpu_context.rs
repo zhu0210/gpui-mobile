@@ -1,4 +1,5 @@
 // Modified for gpui-pre (snapshot of zed@08cbb88): adapt device queues and sRGB detection to wgpu 30.0.1.
+// Modified for gpui-mobile `media`: DMA-BUF import on Linux, `window_context()`.
 #[cfg(not(target_family = "wasm"))]
 use anyhow::Context as _;
 #[cfg(not(target_family = "wasm"))]
@@ -7,6 +8,10 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wgpu::TextureFormat;
+
+/// The last context created for a window; see [`WgpuContext::window_context`].
+#[cfg(not(target_family = "wasm"))]
+static WINDOW_CONTEXT: Mutex<Option<WgpuContext>> = Mutex::new(None);
 
 #[derive(Clone)]
 pub struct WgpuContext {
@@ -166,14 +171,24 @@ impl WgpuContext {
                 reject_software,
             ))?;
 
-        Ok(Self::from_native_adapter_and_device(
+        let context = Self::from_native_adapter_and_device(
             instance,
             adapter,
             device,
             queue,
             dual_source_blending,
             color_texture_format,
-        ))
+        );
+        *WINDOW_CONTEXT.lock() = Some(context.clone());
+        Ok(context)
+    }
+
+    /// The context windows last rendered with, for code outside the renderer
+    /// that draws into the same device (video frames, `gpui_mobile::media`).
+    /// Textures can't cross devices, so such code must use this one.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn window_context() -> Option<Self> {
+        WINDOW_CONTEXT.lock().clone()
     }
 
     /// Unlike [`Self::new_headless`], creates a fresh device from `instance` on every
@@ -448,6 +463,14 @@ impl WgpuContext {
             .contains(wgpu::Features::DUAL_SOURCE_BLENDING);
 
         let mut required_features = wgpu::Features::empty();
+        // Video frames decoded by VA-API arrive as DMA-BUFs, 10-bit ones as
+        // 16-bit planes (`gpui_mobile::media`).
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            required_features |= adapter.features()
+                & (wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF
+                    | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
+        }
         if dual_source_blending {
             required_features |= wgpu::Features::DUAL_SOURCE_BLENDING;
         } else {

@@ -23,7 +23,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, CStr, CString};
 use std::os::fd::AsRawFd;
 use super::player::{
-    monotonic_ns, play_audio, play_video, AudioOutput, AudioSink, AudioSource, Shared, VideoOutput, VideoSource, POLL,
+    play_audio, play_video, AudioOutput, AudioSink, AudioSource, Drift, Shared, VideoOutput, VideoSource, POLL,
 };
 use super::Source;
 use std::ptr::{self, NonNull};
@@ -37,8 +37,6 @@ use std::time::{Duration, Instant};
 /// and one in flight on the GPU.
 const MAX_IMAGES: i32 = 4;
 const DEQUEUE_TIMEOUT_US: i64 = 10_000;
-/// Imported frames per drift report in the log.
-const DRIFT_REPORT_FRAMES: u32 = 300;
 /// `MediaFormat.KEY_ROTATION`, spelled out: the NDK constant needs API 28.
 const KEY_ROTATION: &CStr = c"rotation-degrees";
 const KEY_PCM_ENCODING: &CStr = c"pcm-encoding";
@@ -61,14 +59,6 @@ pub(super) struct Decoder {
     software: Option<Arc<Mutex<Option<super::planes::Picture>>>>,
     #[cfg(feature = "ffmpeg")]
     uploader: RefCell<super::planes::Uploader>,
-}
-
-/// How far imported frames were from the clock, between log reports.
-#[derive(Clone, Copy, Default)]
-struct Drift {
-    frames: u32,
-    total_us: i64,
-    max_us: i64,
 }
 
 impl Decoder {
@@ -310,7 +300,7 @@ impl Decoder {
                 prepared.texture.height()
             );
         }
-        self.record_drift(timestamp_us);
+        self.shared.record_drift(&self.drift, timestamp_us);
         Ok(())
     }
 
@@ -338,32 +328,8 @@ impl Decoder {
                 texture.height()
             );
         }
-        self.record_drift(frame.timestamp_us);
+        self.shared.record_drift(&self.drift, frame.timestamp_us);
         Ok(())
-    }
-
-    /// Logs how far imported frames trail or lead the clock while playing.
-    fn record_drift(&self, timestamp_us: i64) {
-        let state = self.shared.lock();
-        if !state.running {
-            return;
-        }
-        let drift_us = state.position_at(monotonic_ns()) - timestamp_us;
-        drop(state);
-        let mut drift = self.drift.get();
-        drift.frames += 1;
-        drift.total_us += drift_us;
-        drift.max_us = drift.max_us.max(drift_us.abs());
-        if drift.frames == DRIFT_REPORT_FRAMES {
-            log::info!(
-                "video: A/V drift over {} frames: mean {:.1} ms, max {:.1} ms",
-                drift.frames,
-                drift.total_us as f64 / drift.frames as f64 / 1000.0,
-                drift.max_us as f64 / 1000.0,
-            );
-            drift = Drift::default();
-        }
-        self.drift.set(drift);
     }
 }
 

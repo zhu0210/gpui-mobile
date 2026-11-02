@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 pub(super) const LATE_US: i64 = 50_000;
 /// How long the playback threads wait before looking at the state again.
 pub(super) const POLL: Duration = Duration::from_millis(20);
+/// Imported frames per drift report in the log.
+const DRIFT_REPORT_FRAMES: u32 = 300;
 /// How long a seek waits for the audio stream's first timestamp.
 const HOLD_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -467,3 +469,36 @@ pub(super) fn play_audio<S: AudioSink>(source: &mut dyn AudioSource, shared: &Sh
     }
 }
 
+/// How far imported frames were from the clock, between log reports.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Drift {
+    frames: u32,
+    total_us: i64,
+    max_us: i64,
+}
+
+impl Shared {
+    /// Logs how far imported frames trail or lead the clock while playing.
+    pub fn record_drift(&self, drift: &std::cell::Cell<Drift>, timestamp_us: i64) {
+        let state = self.lock();
+        if !state.running {
+            return;
+        }
+        let drift_us = state.position_at(monotonic_ns()) - timestamp_us;
+        drop(state);
+        let mut current = drift.get();
+        current.frames += 1;
+        current.total_us += drift_us;
+        current.max_us = current.max_us.max(drift_us.abs());
+        if current.frames == DRIFT_REPORT_FRAMES {
+            log::info!(
+                "video: A/V drift over {} frames: mean {:.1} ms, max {:.1} ms",
+                current.frames,
+                current.total_us as f64 / current.frames as f64 / 1000.0,
+                current.max_us as f64 / 1000.0,
+            );
+            current = Drift::default();
+        }
+        drift.set(current);
+    }
+}
