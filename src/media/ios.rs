@@ -26,6 +26,8 @@ const MTL_PIXEL_FORMAT_BGRA8: usize = 80;
 /// `AVPlayerActionAtItemEnd`.
 const ACTION_PAUSE: isize = 1;
 const ACTION_NONE: isize = 2;
+/// `AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation`.
+const NOTIFY_OTHERS_ON_DEACTIVATION: usize = 1;
 /// `AVPlayerItemStatusReadyToPlay`.
 const ITEM_READY: isize = 1;
 /// `AVPlayerItemStatusFailed`.
@@ -87,6 +89,7 @@ impl Decoder {
                 bail!("AVPlayer failed");
             }
             let player: *mut AnyObject = msg_send![player, retain];
+            audio_session_acquire();
             let _: () = msg_send![player, setActionAtItemEnd: ACTION_PAUSE];
             let _: () = msg_send![player, play];
             log::info!("video: playing {source:?} through AVPlayer");
@@ -374,6 +377,53 @@ impl Drop for Decoder {
             let _: () = msg_send![self.player, release];
             let _: () = msg_send![self.output, release];
         }
+        audio_session_release();
+    }
+}
+
+thread_local! {
+    /// Live players, all on the main thread.
+    static PLAYERS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The default session category (SoloAmbient) is muted by the silent
+/// switch; video apps play through it, so the first player sets Playback.
+/// AVPlayer pauses itself when a call or Siri interrupts the session.
+fn audio_session_acquire() {
+    if PLAYERS.replace(PLAYERS.get() + 1) > 0 {
+        return;
+    }
+    // SAFETY: the shared session and its constant strings, on the main thread.
+    unsafe {
+        let session: *mut AnyObject = msg_send![class!(AVAudioSession), sharedInstance];
+        let set: bool = msg_send![
+            session,
+            setCategory: AVAudioSessionCategoryPlayback,
+            mode: AVAudioSessionModeMoviePlayback,
+            options: 0usize,
+            error: ptr::null_mut::<*mut AnyObject>()
+        ];
+        let active: bool = msg_send![session, setActive: true, error: ptr::null_mut::<*mut AnyObject>()];
+        if !set || !active {
+            log::warn!("video: audio session not set up (category {set}, active {active})");
+        }
+    }
+}
+
+/// After the last player, gives the audio back to other apps.
+fn audio_session_release() {
+    if PLAYERS.replace(PLAYERS.get().saturating_sub(1)) != 1 {
+        return;
+    }
+    // SAFETY: the shared session, on the main thread.
+    unsafe {
+        let session: *mut AnyObject = msg_send![class!(AVAudioSession), sharedInstance];
+        let _: bool = msg_send![
+            session,
+            setActive: false,
+            withOptions: NOTIFY_OTHERS_ON_DEACTIVATION,
+            error: ptr::null_mut::<*mut AnyObject>()
+        ];
     }
 }
 
@@ -477,6 +527,8 @@ unsafe impl Encode for CGAffineTransform {
 #[link(name = "CoreMedia", kind = "framework")]
 extern "C" {
     static AVMediaTypeVideo: *mut AnyObject;
+    static AVAudioSessionCategoryPlayback: *mut AnyObject;
+    static AVAudioSessionModeMoviePlayback: *mut AnyObject;
 }
 
 #[link(name = "QuartzCore", kind = "framework")]
