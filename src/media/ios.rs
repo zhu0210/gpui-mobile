@@ -90,6 +90,23 @@ forward! {
     ended() -> bool;
     is_active() -> bool;
     update(image_id: ImageId) -> Result<()>;
+    set_rate(rate: f32);
+    rate() -> f32;
+    set_volume(volume: f32);
+    volume() -> f32;
+    set_muted(muted: bool);
+    is_muted() -> bool;
+    buffered() -> Duration;
+}
+
+#[cfg(feature = "ffmpeg")]
+impl Decoder {
+    pub fn controls(&self) -> Option<&super::ffmpeg::Controls> {
+        match self {
+            Self::Player(_) => None,
+            Self::Ffmpeg(player) => player.controls(),
+        }
+    }
 }
 
 /// `AVPlayer` with an `AVPlayerItemVideoOutput`.
@@ -100,6 +117,8 @@ pub(super) struct Player {
     /// ready, so a stream's tracks are known without blocking).
     transform_checked: Cell<bool>,
     looping: Cell<bool>,
+    /// The speed `play` starts at.
+    rate: Cell<f32>,
     size: Cell<Size<DevicePixels>>,
     cache: TextureCache,
     frames_shown: Cell<u64>,
@@ -162,6 +181,7 @@ impl Player {
                 output,
                 transform_checked: Cell::new(false),
                 looping: Cell::new(false),
+                rate: Cell::new(1.0),
                 size: Cell::new(Size::default()),
                 cache: RefCell::new(None),
                 frames_shown: Cell::new(0),
@@ -184,7 +204,7 @@ impl Player {
             self.seek(Duration::ZERO);
         }
         // SAFETY: a live player, on the main thread.
-        unsafe { msg_send![self.player, play] }
+        unsafe { msg_send![self.player, setRate: self.rate.get()] }
     }
 
     pub fn pause(&self) {
@@ -207,6 +227,60 @@ impl Player {
         let zero = CMTime::from_micros(0);
         // SAFETY: a live player, on the main thread.
         unsafe { msg_send![self.player, seekToTime: time, toleranceBefore: zero, toleranceAfter: zero] }
+    }
+
+    /// AVPlayer keeps the pitch at any speed.
+    pub fn set_rate(&self, rate: f32) {
+        self.rate.set(rate);
+        if !self.is_paused() {
+            // SAFETY: a live player, on the main thread.
+            unsafe { msg_send![self.player, setRate: rate] }
+        }
+    }
+
+    pub fn rate(&self) -> f32 {
+        self.rate.get()
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        // SAFETY: a live player, on the main thread.
+        unsafe { msg_send![self.player, setVolume: volume] }
+    }
+
+    pub fn volume(&self) -> f32 {
+        // SAFETY: a live player, on the main thread.
+        unsafe { msg_send![self.player, volume] }
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        // SAFETY: a live player, on the main thread.
+        unsafe { msg_send![self.player, setMuted: muted] }
+    }
+
+    pub fn is_muted(&self) -> bool {
+        // SAFETY: a live player, on the main thread.
+        unsafe { msg_send![self.player, isMuted] }
+    }
+
+    /// The end of the loaded time range that holds the position.
+    pub fn buffered(&self) -> Duration {
+        let position = self.position_us();
+        let mut end = position;
+        // SAFETY: a live item, on the main thread; the array holds NSValues
+        // of CMTimeRange.
+        unsafe {
+            let ranges: *mut AnyObject = msg_send![self.item(), loadedTimeRanges];
+            let count: usize = if ranges.is_null() { 0 } else { msg_send![ranges, count] };
+            for index in 0..count {
+                let value: *mut AnyObject = msg_send![ranges, objectAtIndex: index];
+                let range: CMTimeRange = msg_send![value, CMTimeRangeValue];
+                let start = range.start.micros();
+                if (start..=start + range.duration.micros()).contains(&position) {
+                    end = end.max(start + range.duration.micros());
+                }
+            }
+        }
+        Duration::from_micros(end.max(0) as u64)
     }
 
     pub fn set_looping(&self, looping: bool) {
@@ -864,6 +938,19 @@ unsafe impl Encode for CMTime {
         "?",
         &[Encoding::LongLong, Encoding::Int, Encoding::UInt, Encoding::LongLong],
     );
+}
+
+/// CMTimeRange: a start and a duration.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CMTimeRange {
+    start: CMTime,
+    duration: CMTime,
+}
+
+// SAFETY: two CMTimes, in an anonymous struct like CMTime's.
+unsafe impl Encode for CMTimeRange {
+    const ENCODING: Encoding = Encoding::Struct("?", &[CMTime::ENCODING, CMTime::ENCODING]);
 }
 
 // SAFETY: a pointer to the struct above.

@@ -8,6 +8,8 @@
 //! `clip` defaults to the bundled 60 s clip; `hls` plays the bundled AES-128
 //! HLS fixture through `open_hls`, every byte fetched by Rust. `software`
 //! forces software decoding; `reader` feeds the clip through `open_reader`. `ZED_DEVICE_ID=0x<pci id>` picks the GPU.
+//! `GPUI_VIDEO_CONTROLS=1` plays at 1.5× with the last audio track and the
+//! first subtitles (try `example/assets/video/tracks.mp4`).
 
 use gpui::{
     canvas, div, prelude::*, px, rgb, rgba, size, App, Bounds, Context, Corners, Window,
@@ -46,15 +48,33 @@ impl Render for Player {
                     .bg(rgba(0x000000aa))
                     .text_color(rgb(0xffffff))
                     .child(format!(
-                        "GPUI overlay · {}x{} · {:.1}/{:.1} s · {} frames{}",
+                        "GPUI overlay · {}x{} · {:.1}/{:.1} s (buffered {:.1}) · {}× · audio {:?} · {} frames{}",
                         size.width.0,
                         size.height.0,
                         video.position().as_secs_f32(),
                         video.duration().as_secs_f32(),
+                        video.buffered().as_secs_f32(),
+                        video.rate(),
+                        video.audio_track(),
                         video.frames_shown(),
                         if video.is_paused() { " · paused" } else { "" },
                     )),
             )
+            .when_some(video.subtitle_text(), |this, text| {
+                this.child(
+                    div()
+                        .absolute()
+                        .bottom_8()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .text_xl()
+                        .text_color(rgb(0xffffff))
+                        .children(text.lines().map(|line| div().px_2().bg(rgba(0x000000cc)).child(line.to_owned())).collect::<Vec<_>>()),
+                )
+            })
     }
 }
 
@@ -98,6 +118,13 @@ fn main() {
                 }
                 .expect("opening the clip");
                 video.set_looping(true);
+                if std::env::var("GPUI_VIDEO_CONTROLS").is_ok_and(|value| value == "1") {
+                    video.set_rate(1.5);
+                    if let Some(track) = video.audio_tracks().last() {
+                        video.set_audio_track(track.id);
+                    }
+                    video.set_subtitle_track(video.subtitle_tracks().first().map(|track| track.id));
+                }
                 let player = cx.new(|_| Player { video });
                 // The overlay's text changes as the video plays.
                 cx.spawn({
