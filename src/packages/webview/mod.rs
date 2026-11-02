@@ -105,6 +105,8 @@ pub fn load_url(url: &str, settings: &WebViewSettings) -> Result<WebViewHandle, 
     ensure_factory_registered();
 
     let mut params_map = settings_to_creation_params(settings);
+    // No element places it: the platform shows it over the window below `top_offset`.
+    params_map.insert("overlay".to_string(), "1".to_string());
     params_map.insert("url".to_string(), url.to_string());
 
     let params = PlatformViewParams {
@@ -128,6 +130,8 @@ pub fn load_html(html: &str, settings: &WebViewSettings) -> Result<WebViewHandle
     ensure_factory_registered();
 
     let mut params_map = settings_to_creation_params(settings);
+    // No element places it: the platform shows it over the window below `top_offset`.
+    params_map.insert("overlay".to_string(), "1".to_string());
     params_map.insert("html".to_string(), html.to_string());
 
     let params = PlatformViewParams {
