@@ -305,9 +305,10 @@ impl IosPlatformView {
     }
 
     /// Shows a view opened on its own, with no element to place it (`webview::load_url`): it
-    /// covers the window below `top`, above GPUI's content, and follows the window's size.
+    /// covers the window below `top` and right of `left`, above GPUI's content, and follows the
+    /// window's size.
     #[cfg(target_os = "ios")]
-    fn show_as_overlay(&self, top: f64) -> Result<(), String> {
+    fn show_as_overlay(&self, left: f64, top: f64) -> Result<(), String> {
         let native_view = *self.native_view.lock().unwrap();
         let window = super::ffi::IOS_WINDOW_LIST
             .get()
@@ -320,7 +321,7 @@ impl IosPlatformView {
                 return Err("The GPUI window has no view".into());
             }
             let area: ObjcCGRect = msg_send![vc_view, bounds];
-            let frame = ObjcCGRect::new(0.0, top, area.width, (area.height - top).max(0.0));
+            let frame = ObjcCGRect::new(left, top, (area.width - left).max(0.0), (area.height - top).max(0.0));
             let _: () = msg_send![native_view, setFrame: frame];
             // UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight
             let _: () = msg_send![native_view, setAutoresizingMask: 18_usize];
@@ -450,7 +451,7 @@ impl PlatformViewFactory for IosPlatformViewFactory {
         {
             let view = IosPlatformView::new(&self.view_type, params)?;
             if params.creation_params.contains_key("overlay") {
-                view.show_as_overlay(params.bounds.y as f64)?;
+                view.show_as_overlay(params.bounds.x as f64, params.bounds.y as f64)?;
             }
             Ok(Box::new(view))
         }

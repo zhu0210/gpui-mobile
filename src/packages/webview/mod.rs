@@ -33,6 +33,8 @@ pub struct WebViewSettings {
     /// below the top of the screen, leaving room for a GPUI-rendered app bar.
     /// Default: 0.0 (fullscreen).
     pub top_offset: f32,
+    /// Left offset in logical points, as `top_offset`: room for a sidebar beside it.
+    pub left_offset: f32,
     /// Navigations to URLs starting with this are stopped and handed to the app
     /// through [`WebViewHandle::take_intercepted`], such as a sign-in page's
     /// redirect back to the app. Default: none.
@@ -47,6 +49,7 @@ impl Default for WebViewSettings {
             zoom_enabled: true,
             dom_storage_enabled: true,
             top_offset: 0.0,
+            left_offset: 0.0,
             intercept: None,
         }
     }
@@ -105,13 +108,13 @@ pub fn load_url(url: &str, settings: &WebViewSettings) -> Result<WebViewHandle, 
     ensure_factory_registered();
 
     let mut params_map = settings_to_creation_params(settings);
-    // No element places it: the platform shows it over the window below `top_offset`.
+    // No element places it: the platform shows it over the window below `top_offset`, right of `left_offset`.
     params_map.insert("overlay".to_string(), "1".to_string());
     params_map.insert("url".to_string(), url.to_string());
 
     let params = PlatformViewParams {
         bounds: PlatformViewBounds {
-            x: 0.0,
+            x: settings.left_offset,
             y: settings.top_offset,
             width: 0.0, // Will be set by platform_view_element
             height: 0.0,
@@ -130,13 +133,13 @@ pub fn load_html(html: &str, settings: &WebViewSettings) -> Result<WebViewHandle
     ensure_factory_registered();
 
     let mut params_map = settings_to_creation_params(settings);
-    // No element places it: the platform shows it over the window below `top_offset`.
+    // No element places it: the platform shows it over the window below `top_offset`, right of `left_offset`.
     params_map.insert("overlay".to_string(), "1".to_string());
     params_map.insert("html".to_string(), html.to_string());
 
     let params = PlatformViewParams {
         bounds: PlatformViewBounds {
-            x: 0.0,
+            x: settings.left_offset,
             y: settings.top_offset,
             width: 0.0,
             height: 0.0,
