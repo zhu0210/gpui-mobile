@@ -1677,6 +1677,70 @@ pub fn set_system_chrome(style: &crate::SystemChromeStyle) {
     );
 }
 
+// ── immersive mode ───────────────────────────────────────────────────────────
+
+static IMMERSIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the system bars are hidden ([`set_immersive`]).
+pub fn immersive() -> bool {
+    IMMERSIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Hides the status and navigation bars (`on`) or brings them back: through the window's
+/// `WindowInsetsController` (API 30+), else the decor view's system UI flags.
+pub fn set_immersive(on: bool) {
+    IMMERSIVE.store(on, std::sync::atomic::Ordering::Relaxed);
+    let result = with_env(|env| {
+        let activity_obj = activity(env)?;
+        let window = env
+            .call_method(&activity_obj, jni::jni_str!("getWindow"), jni::jni_sig!("()Landroid/view/Window;"), &[])
+            .and_then(|v: jni::objects::JValueOwned| v.l())
+            .map_err(|e| {
+                env.exception_clear();
+                e.to_string()
+            })?;
+        let ctl = env
+            .call_method(&window, jni::jni_str!("getInsetsController"), jni::jni_sig!("()Landroid/view/WindowInsetsController;"), &[])
+            .and_then(|v: jni::objects::JValueOwned| v.l());
+        match ctl {
+            Ok(ctl) if !ctl.is_null() => {
+                // WindowInsets.Type.systemBars(), and BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE.
+                let bars: i32 = 1 | 2;
+                let _ = env.call_method(&ctl, jni::jni_str!("setSystemBarsBehavior"), jni::jni_sig!("(I)V"), &[JValue::Int(2)]);
+                let _ = if on {
+                    env.call_method(&ctl, jni::jni_str!("hide"), jni::jni_sig!("(I)V"), &[JValue::Int(bars)])
+                } else {
+                    env.call_method(&ctl, jni::jni_str!("show"), jni::jni_sig!("(I)V"), &[JValue::Int(bars)])
+                };
+                env.exception_clear();
+            }
+            _ => {
+                env.exception_clear();
+                let decor = env
+                    .call_method(&window, jni::jni_str!("getDecorView"), jni::jni_sig!("()Landroid/view/View;"), &[])
+                    .and_then(|v: jni::objects::JValueOwned| v.l())
+                    .map_err(|e| {
+                        env.exception_clear();
+                        e.to_string()
+                    })?;
+                let current = env
+                    .call_method(&decor, jni::jni_str!("getSystemUiVisibility"), jni::jni_sig!("()I"), &[])
+                    .and_then(|v: jni::objects::JValueOwned| v.i())
+                    .unwrap_or(0);
+                // IMMERSIVE_STICKY | FULLSCREEN | HIDE_NAVIGATION.
+                let flags = 0x1000 | 0x4 | 0x2;
+                let next = if on { current | flags } else { current & !flags };
+                let _ = env.call_method(&decor, jni::jni_str!("setSystemUiVisibility"), jni::jni_sig!("(I)V"), &[JValue::Int(next)]);
+                env.exception_clear();
+            }
+        }
+        Ok(())
+    });
+    if let Err(e) = result {
+        log::warn!("set_immersive: {e}");
+    }
+}
+
 // ── software keyboard (IME) control ───────────────────────────────────────────
 
 /// The keyboard type currently requested, or `None` when hidden.
