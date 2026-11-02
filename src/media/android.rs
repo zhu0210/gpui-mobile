@@ -22,7 +22,7 @@ use ndk_sys as ffi;
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, CStr, CString};
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use super::Source;
 use std::ptr::{self, NonNull};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -73,20 +73,20 @@ struct Drift {
 }
 
 impl Decoder {
-    pub fn open(path: &Path, source: super::Source) -> Result<Self> {
-        match source {
-            super::Source::Platform => Self::open_platform(path),
+    pub fn open(source: Source, backend: super::Backend) -> Result<Self> {
+        match backend {
+            super::Backend::Platform => Self::open_platform(source),
             #[cfg(feature = "ffmpeg")]
-            super::Source::Ffmpeg => Self::open_ffmpeg(path, false),
+            super::Backend::Ffmpeg => Self::open_ffmpeg(source, false),
             #[cfg(feature = "ffmpeg")]
-            super::Source::FfmpegSoftware => Self::open_ffmpeg(path, true),
+            super::Backend::FfmpegSoftware => Self::open_ffmpeg(source, true),
         }
     }
 
     /// `AMediaExtractor` + `AMediaCodec`.
-    fn open_platform(path: &Path) -> Result<Self> {
-        let video = Track::open(path, "video/")?.ok_or_else(|| anyhow!("no video track"))?;
-        let audio = Track::open(path, "audio/").unwrap_or_else(|error| {
+    fn open_platform(source: Source) -> Result<Self> {
+        let video = Track::open(source, "video/")?.ok_or_else(|| anyhow!("no video track"))?;
+        let audio = Track::open(source, "audio/").unwrap_or_else(|error| {
             log::warn!("video: audio track skipped: {error:#}");
             None
         });
@@ -114,7 +114,7 @@ impl Decoder {
             None => None,
         };
         log::info!(
-            "video: decoding {} {width}x{height} (rotated {rotation}°, audio {}) from {path:?}",
+            "video: decoding {} {width}x{height} (rotated {rotation}°, audio {}) from {source:?}",
             video.mime,
             audio.as_ref().map_or("none", |audio| audio.track.mime.as_str()),
         );
@@ -133,8 +133,12 @@ impl Decoder {
     /// FFmpeg demuxing, decoding through MediaCodec into the reader, or in
     /// software when MediaCodec can't (or `software` asks for it).
     #[cfg(feature = "ffmpeg")]
-    fn open_ffmpeg(path: &Path, software: bool) -> Result<Self> {
+    fn open_ffmpeg(source: Source, software: bool) -> Result<Self> {
         use super::ffmpeg::{probe, FfmpegAudio, FfmpegVideo};
+        let Source::File(path) = source else {
+            // Built without network: Cirrus will feed FFmpeg through its own IO.
+            bail!("the FFmpeg backend plays files only, not {source:?}");
+        };
         let info = probe(path)?;
         let reader = Reader::new(info.width, info.height)?;
         let slot = Arc::new(Mutex::new(None));
@@ -924,23 +928,33 @@ unsafe impl Send for Track {}
 
 impl Track {
     /// The first track whose MIME type starts with `kind`.
-    fn open(path: &Path, kind: &str) -> Result<Option<Self>> {
-        let file = std::fs::File::open(path).with_context(|| format!("opening {path:?}"))?;
-        let length = file.metadata()?.len() as i64;
+    fn open(source: Source, kind: &str) -> Result<Option<Self>> {
         // SAFETY: plain constructor.
         let extractor = NonNull::new(unsafe { ffi::AMediaExtractor_new() })
             .map(Extractor)
             .ok_or_else(|| anyhow!("AMediaExtractor_new failed"))?;
-        // SAFETY: the extractor is live and the descriptor open for the call
-        // (the extractor dups what it keeps); formats are owned by `Format`.
+        match source {
+            Source::File(path) => {
+                let file = std::fs::File::open(path).with_context(|| format!("opening {path:?}"))?;
+                let length = file.metadata()?.len() as i64;
+                // SAFETY: the extractor is live and the descriptor open for
+                // the call (the extractor dups what it keeps).
+                status(unsafe {
+                    ffi::AMediaExtractor_setDataSourceFd(extractor.0.as_ptr(), file.as_raw_fd(), 0, length)
+                })
+                .context("AMediaExtractor_setDataSourceFd")?;
+            }
+            Source::Url(url) => {
+                let url = CString::new(url)?;
+                // ponytail: connects on the calling thread (the UI thread when
+                // opened from a view); move it to a thread if streams start slowly.
+                // SAFETY: a live extractor and a C string for the call.
+                status(unsafe { ffi::AMediaExtractor_setDataSource(extractor.0.as_ptr(), url.as_ptr()) })
+                    .with_context(|| format!("AMediaExtractor_setDataSource {url:?}"))?;
+            }
+        }
+        // SAFETY: the extractor is live; formats are owned by `Format`.
         unsafe {
-            status(ffi::AMediaExtractor_setDataSourceFd(
-                extractor.0.as_ptr(),
-                file.as_raw_fd(),
-                0,
-                length,
-            ))
-            .context("AMediaExtractor_setDataSourceFd")?;
             for track in 0..ffi::AMediaExtractor_getTrackCount(extractor.0.as_ptr()) {
                 let Some(format) =
                     NonNull::new(ffi::AMediaExtractor_getTrackFormat(extractor.0.as_ptr(), track))

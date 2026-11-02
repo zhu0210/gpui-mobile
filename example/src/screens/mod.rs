@@ -27,7 +27,6 @@ pub mod native_video;
 pub mod packages_demo;
 pub mod settings;
 pub mod swiper;
-pub mod video_player;
 pub mod webview_browser;
 
 use crate::demos::{AnimationPlayground, ShaderShowcase};
@@ -59,7 +58,6 @@ pub enum Screen {
     Feed,
     Chat,
     AudioPlayer,
-    VideoPlayer,
     NativeVideo,
     Markdown,
 }
@@ -99,8 +97,7 @@ impl Screen {
             "feed" => Some(Screen::Feed),
             "chat" => Some(Screen::Chat),
             "audio_player" | "audio" => Some(Screen::AudioPlayer),
-            "video_player" | "video" => Some(Screen::VideoPlayer),
-            "native_video" => Some(Screen::NativeVideo),
+            "native_video" | "video_player" | "video" => Some(Screen::NativeVideo),
             _ => None,
         }
     }
@@ -124,7 +121,6 @@ impl Screen {
             Screen::Feed => "Feed",
             Screen::Chat => "Sarah Johnson",
             Screen::AudioPlayer => "Audio Player",
-            Screen::VideoPlayer => "Video Player",
             Screen::NativeVideo => "Video in the Scene",
         }
     }
@@ -298,10 +294,6 @@ impl Router {
             if self.current_screen == Screen::WebViewBrowser {
                 webview_browser::dismiss_webview();
             }
-            // Dismiss video surface when leaving video player
-            if self.current_screen == Screen::VideoPlayer {
-                video_player::dismiss();
-            }
             // Pause audio when leaving audio player
             if self.current_screen == Screen::AudioPlayer {
                 audio_player::dismiss();
@@ -340,10 +332,6 @@ impl Router {
             // Dismiss webview when leaving browser
             if self.current_screen == Screen::WebViewBrowser {
                 webview_browser::dismiss_webview();
-            }
-            // Dismiss video surface when leaving video player
-            if self.current_screen == Screen::VideoPlayer {
-                video_player::dismiss();
             }
             // Pause audio when leaving audio player
             if self.current_screen == Screen::AudioPlayer {
@@ -528,11 +516,6 @@ impl Router {
             Screen::Feed => self.render_feed_screen(cx).into_any_element(),
             Screen::Chat => self.render_chat_screen(cx).into_any_element(),
             Screen::AudioPlayer => self.render_audio_player_screen(cx).into_any_element(),
-            Screen::VideoPlayer => {
-                // Video player has its own layout with fixed video area + scrollable controls.
-                // Rendered directly in render_current_screen to bypass the scroll wrapper.
-                return self.render_video_player_screen(window, cx).into_any_element();
-            }
             Screen::Animations | Screen::Shaders => unreachable!(),
         };
 
@@ -669,10 +652,6 @@ impl Router {
         audio_player::render(self, cx)
     }
 
-    fn render_video_player_screen(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        video_player::render(self, window, cx)
-    }
-
     // ── Demo screen content (rendered below the TopAppBar) ────────────────────
 
     /// Render the Animations content area with touch handlers.
@@ -728,28 +707,13 @@ impl Router {
                 cx.listener(|this, event: &MouseUpEvent, _window, cx| {
                     if let Some(playground) = &mut this.animation_playground {
                         let position = point(event.position.x.as_f32(), event.position.y.as_f32());
-
-                        if let Some((start_pos, start_time)) = playground.touch_start.take() {
-                            let elapsed = start_time.elapsed();
-                            let dx = position.x - start_pos.x;
-                            let dy = position.y - start_pos.y;
-                            let distance = (dx * dx + dy * dy).sqrt();
-
-                            if elapsed < std::time::Duration::from_millis(200) && distance < 20.0 {
-                                let color_rgb = crate::demos::random_color(playground.next_ball_id);
-                                playground.spawn_particles(position, rgb(color_rgb).into());
-                                playground.next_ball_id += 1;
-                            } else {
-                                let dt = elapsed.as_secs_f32().max(0.01);
-                                let velocity = point(dx / dt * 0.5, dy / dt * 0.5);
-                                playground.spawn_ball(start_pos, velocity);
-                            }
-                        }
-                        playground.current_touch = None;
+                        playground.release(position);
                         cx.notify();
                     }
                 }),
             )
+            // A finger sends touch gestures, never the mouse events above.
+            .child(playground_touches(cx.entity().downgrade()))
             .child(if let Some(playground) = &mut self.animation_playground {
                 playground.render_content(window).into_any_element()
             } else {
@@ -817,3 +781,50 @@ impl Router {
     }
 }
 
+/// Feeds a finger to the animation playground. Claiming the touch drag makes GPUI
+/// end even a tap as one, so a tap bursts particles and a drag flings a ball.
+fn playground_touches(router: gpui::WeakEntity<Router>) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            window.on_mouse_event(move |event: &gpui::TouchDragEvent, phase, window, cx| {
+                if !phase.bubble() {
+                    return;
+                }
+                if event.phase == gpui::TouchPhase::Started {
+                    if window.default_prevented() || !bounds.contains(&event.start_position) {
+                        return;
+                    }
+                    window.prevent_default();
+                }
+                let at = point(event.position.x.as_f32(), event.position.y.as_f32());
+                let start = point(event.start_position.x.as_f32(), event.start_position.y.as_f32());
+                router
+                    .update(cx, |router, cx| {
+                        let Some(playground) = &mut router.animation_playground else {
+                            return;
+                        };
+                        match event.phase {
+                            gpui::TouchPhase::Started => {
+                                playground.touch_start = Some((start, std::time::Instant::now()));
+                                playground.current_touch = Some(at);
+                            }
+                            gpui::TouchPhase::Moved if playground.touch_start.is_some() => {
+                                playground.current_touch = Some(at);
+                            }
+                            gpui::TouchPhase::Moved => {}
+                            gpui::TouchPhase::Ended => playground.release(at),
+                            gpui::TouchPhase::Cancelled => {
+                                playground.touch_start = None;
+                                playground.current_touch = None;
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+}

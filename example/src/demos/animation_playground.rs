@@ -205,8 +205,12 @@ impl AnimationPlayground {
     }
 
     fn handle_touch_up(&mut self, event: &MouseUpEvent, cx: &mut gpui::Context<Self>) {
-        let position = point(event.position.x.as_f32(), event.position.y.as_f32());
+        self.release(point(event.position.x.as_f32(), event.position.y.as_f32()));
+        cx.notify();
+    }
 
+    /// Ends a press at `position`: a quick tap bursts particles, a drag flings a ball.
+    pub fn release(&mut self, position: Point<f32>) {
         if let Some((start_pos, start_time)) = self.touch_start.take() {
             let elapsed = start_time.elapsed();
             let dx = position.x - start_pos.x;
@@ -226,7 +230,6 @@ impl AnimationPlayground {
             }
         }
         self.current_touch = None;
-        cx.notify();
     }
 
     /// Render just the animation content (canvas + instructions overlay).
