@@ -26,11 +26,11 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "ffmpeg")]
 use super::planes::{Picture, Uploader};
 #[cfg(feature = "ffmpeg")]
-use super::player::{play_audio, play_video, AudioSink, Shared};
+use super::ffmpeg::FfmpegPlayer;
+#[cfg(feature = "ffmpeg")]
+use super::player::AudioSink;
 #[cfg(feature = "ffmpeg")]
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-#[cfg(feature = "ffmpeg")]
-use std::thread::JoinHandle;
 
 /// `kCVPixelFormatType_32BGRA`.
 const PIXEL_FORMAT_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
@@ -50,7 +50,7 @@ const ITEM_FAILED: isize = 2;
 pub(super) enum Decoder {
     Player(Player),
     #[cfg(feature = "ffmpeg")]
-    Ffmpeg(Box<FfmpegPlayer>),
+    Ffmpeg(Box<FfmpegPlayer<Ios>>),
 }
 
 impl Decoder {
@@ -58,9 +58,7 @@ impl Decoder {
         Ok(match backend {
             Backend::Platform => Self::Player(Player::open(source)?),
             #[cfg(feature = "ffmpeg")]
-            Backend::Ffmpeg => Self::Ffmpeg(Box::new(FfmpegPlayer::open(source, false)?)),
-            #[cfg(feature = "ffmpeg")]
-            Backend::FfmpegSoftware => Self::Ffmpeg(Box::new(FfmpegPlayer::open(source, true)?)),
+            Backend::Ffmpeg | Backend::FfmpegSoftware => Self::Ffmpeg(Box::new(FfmpegPlayer::open(source, backend)?)),
         })
     }
 }
@@ -434,190 +432,53 @@ fn import(cache: &TextureCache, buffer: CFRef, device: &wgpu::Device) -> Result<
     Ok(texture)
 }
 
-/// FFmpeg demuxing, decoding through VideoToolbox (or in software), with the
-/// video thread on the shared clock ([`super::player`]).
+/// The FFmpeg backend's iOS parts: VideoToolbox pixel buffers through the
+/// texture cache, sound through an AudioQueue.
 #[cfg(feature = "ffmpeg")]
-pub(super) struct FfmpegPlayer {
-    size: Size<DevicePixels>,
-    rotation: i32,
-    duration_us: i64,
-    /// Whether an audio thread was started, which holds the audio session.
-    has_audio: bool,
-    shared: Arc<Shared>,
-    threads: Vec<JoinHandle<()>>,
-    slot: Arc<Mutex<Option<Picture>>>,
+#[derive(Default)]
+pub(super) struct Ios {
     cache: TextureCache,
-    uploader: RefCell<Uploader>,
-    frames_shown: Cell<u64>,
-    last_import: Cell<Option<Instant>>,
 }
 
 #[cfg(feature = "ffmpeg")]
-impl FfmpegPlayer {
-    fn open(source: Source, software: bool) -> Result<Self> {
-        let Source::File(path) = source else {
-            // Built without network, as on Android.
-            bail!("the FFmpeg backend plays files only, not {source:?}");
+impl super::ffmpeg::Platform for Ios {
+    type Sink = AudioQueue;
+    const IMPORT: &str = "VideoToolbox pixel buffer imported as a Metal texture";
+
+    fn context() -> Option<gpui_wgpu::WgpuContext> {
+        crate::ios::gpu_context()?.borrow().clone()
+    }
+
+    fn hardware(_context: Option<&gpui_wgpu::WgpuContext>) -> Option<super::ffmpeg::HardwareTarget> {
+        Some(())
+    }
+
+    fn import(
+        &self,
+        picture: &Picture,
+        rotation: i32,
+        uploader: &mut Uploader,
+        context: &gpui_wgpu::WgpuContext,
+    ) -> Result<Option<Arc<wgpu::Texture>>> {
+        let Some(buffer) = picture.pixel_buffer() else {
+            return Ok(None);
         };
-        let info = super::ffmpeg::probe(path)?;
-        let slot = Arc::new(Mutex::new(None));
-        let (mut video, _) = super::ffmpeg::FfmpegVideo::open(path, (!software).then_some(()), slot.clone())?;
-        let audio = if info.has_audio {
-            super::ffmpeg::FfmpegAudio::open(path)
-                .map_err(|error| log::warn!("video: audio stream skipped: {error:#}"))
-                .ok()
+        // SAFETY: a live pixel buffer; the texture keeps its own reference.
+        let buffer = CFRef::new(unsafe { CFRetain(buffer) }).ok_or_else(|| anyhow!("null pixel buffer"))?;
+        let texture = import(&self.cache, buffer, &context.device)?;
+        Ok(Some(if rotation == 0 {
+            Arc::new(texture)
         } else {
-            None
-        };
-        log::info!(
-            "video: FFmpeg playing {}x{} (rotated {}°, audio {}) from {path:?}",
-            info.width,
-            info.height,
-            info.rotation,
-            audio.is_some(),
-        );
-        let shared = Shared::new(audio.is_some());
-        let mut threads = vec![std::thread::Builder::new().name("gpui-video".into()).spawn({
-            let shared = shared.clone();
-            move || {
-                if let Err(error) = play_video(&mut video, &shared) {
-                    log::error!("video: decoding stopped: {error:#}");
-                }
-            }
-        })?];
-        if let Some(mut audio) = audio {
-            threads.push(std::thread::Builder::new().name("gpui-audio".into()).spawn({
-                let shared = shared.clone();
-                move || {
-                    if let Err(error) = play_audio::<AudioQueue>(&mut audio, &shared) {
-                        log::error!("video: audio stopped: {error:#}");
-                    }
-                    // The video goes on by the monotonic clock.
-                    shared.update(|state| {
-                        state.audio = false;
-                        state.holding = false;
-                    });
-                }
-            })?);
-            audio_session_acquire();
-        }
-        let (width, height) =
-            if info.rotation % 180 == 90 { (info.height, info.width) } else { (info.width, info.height) };
-        Ok(Self {
-            size: Size {
-                width: DevicePixels(width),
-                height: DevicePixels(height),
-            },
-            rotation: info.rotation,
-            duration_us: info.duration_us,
-            has_audio: threads.len() > 1,
-            shared,
-            threads,
-            slot,
-            cache: RefCell::new(None),
-            uploader: RefCell::new(Uploader::default()),
-            frames_shown: Cell::new(0),
-            last_import: Cell::new(None),
-        })
+            uploader.rotate(&texture, rotation, &context.device, &context.queue)?
+        }))
     }
 
-    fn video_size(&self) -> Size<DevicePixels> {
-        self.size
+    fn audio_started() {
+        audio_session_acquire();
     }
 
-    fn frames_shown(&self) -> u64 {
-        self.frames_shown.get()
-    }
-
-    fn play(&self) {
-        self.shared.play()
-    }
-
-    fn pause(&self) {
-        self.shared.pause()
-    }
-
-    fn is_paused(&self) -> bool {
-        self.shared.is_paused()
-    }
-
-    fn seek(&self, position: Duration) {
-        self.shared.seek((position.as_micros() as i64).clamp(0, self.duration_us))
-    }
-
-    fn set_looping(&self, looping: bool) {
-        self.shared.set_looping(looping)
-    }
-
-    fn position(&self) -> Duration {
-        Duration::from_micros(self.shared.position_us().clamp(0, self.duration_us) as u64)
-    }
-
-    fn duration(&self) -> Duration {
-        Duration::from_micros(self.duration_us as u64)
-    }
-
-    fn ended(&self) -> bool {
-        self.shared.ended()
-    }
-
-    fn is_active(&self) -> bool {
-        self.shared.is_active(self.last_import.get())
-    }
-
-    /// Imports the newest decoded picture, if there is one, and makes it the
-    /// texture drawn for `image_id`.
-    fn update(&self, image_id: ImageId) -> Result<()> {
-        let Some(picture) = self.slot.lock().unwrap_or_else(PoisonError::into_inner).take() else {
-            return Ok(());
-        };
-        let context = crate::ios::gpu_context().ok_or_else(|| anyhow!("no GPU context yet"))?;
-        let context = context.borrow();
-        let context = context.as_ref().ok_or_else(|| anyhow!("no GPU context yet"))?;
-        let (texture, path) = match picture.pixel_buffer() {
-            Some(buffer) => {
-                // SAFETY: a live pixel buffer; the texture keeps its own reference.
-                let buffer = CFRef::new(unsafe { CFRetain(buffer) }).ok_or_else(|| anyhow!("null pixel buffer"))?;
-                let texture = import(&self.cache, buffer, &context.device)?;
-                let texture = if self.rotation == 0 {
-                    Arc::new(texture)
-                } else {
-                    self.uploader
-                        .borrow_mut()
-                        .rotate(&texture, self.rotation, &context.device, &context.queue)?
-                };
-                (texture, "VideoToolbox pixel buffer imported as a Metal texture")
-            }
-            None => (
-                self.uploader
-                    .borrow_mut()
-                    .convert(&picture, self.rotation, &context.device, &context.queue)?,
-                "software frame uploaded as planes, converted on the GPU",
-            ),
-        };
-        gpui_wgpu::set_external_texture(image_id, &texture);
-        self.last_import.set(Some(Instant::now()));
-        let shown = self.frames_shown.get() + 1;
-        self.frames_shown.set(shown);
-        if shown == 1 {
-            log::info!("video: {path}, {}x{}", texture.width(), texture.height());
-        }
-        Ok(())
-    }
-}
-
-#[cfg(feature = "ffmpeg")]
-impl Drop for FfmpegPlayer {
-    fn drop(&mut self) {
-        self.shared.update(|state| state.stop = true);
-        for thread in self.threads.drain(..) {
-            if thread.join().is_err() {
-                log::error!("video: playback thread panicked");
-            }
-        }
-        if self.has_audio {
-            audio_session_release();
-        }
+    fn audio_stopped() {
+        audio_session_release();
     }
 }
 
@@ -625,7 +486,7 @@ impl Drop for FfmpegPlayer {
 /// small buffers. A buffer's callback means its frames have played, which
 /// gives the clock its timestamps.
 #[cfg(feature = "ffmpeg")]
-struct AudioQueue {
+pub(super) struct AudioQueue {
     queue: *mut c_void,
     rate: i32,
     channels: i32,
