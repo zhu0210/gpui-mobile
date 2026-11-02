@@ -7,7 +7,8 @@
 //!
 //! With the `ffmpeg` feature, [`FfmpegPlayer`] plays files through FFmpeg
 //! instead: VideoToolbox decodes into BGRA pixel buffers that take the same
-//! import, on the shared playback loop ([`super::player`]).
+//! import, and audio plays through an AudioQueue that drives the shared
+//! clock ([`super::player`]).
 
 use anyhow::{anyhow, bail, Result};
 use gpui::{DevicePixels, ImageId, Size};
@@ -25,9 +26,9 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "ffmpeg")]
 use super::planes::{Picture, Uploader};
 #[cfg(feature = "ffmpeg")]
-use super::player::{play_video, Shared};
+use super::player::{play_audio, play_video, AudioSink, Shared};
 #[cfg(feature = "ffmpeg")]
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 #[cfg(feature = "ffmpeg")]
 use std::thread::JoinHandle;
 
@@ -440,8 +441,10 @@ pub(super) struct FfmpegPlayer {
     size: Size<DevicePixels>,
     rotation: i32,
     duration_us: i64,
+    /// Whether an audio thread was started, which holds the audio session.
+    has_audio: bool,
     shared: Arc<Shared>,
-    thread: Option<JoinHandle<()>>,
+    threads: Vec<JoinHandle<()>>,
     slot: Arc<Mutex<Option<Picture>>>,
     cache: TextureCache,
     uploader: RefCell<Uploader>,
@@ -457,28 +460,47 @@ impl FfmpegPlayer {
             bail!("the FFmpeg backend plays files only, not {source:?}");
         };
         let info = super::ffmpeg::probe(path)?;
-        if info.has_audio {
-            // ponytail: no sound yet; the video follows the monotonic clock.
-            // Add an AudioQueue sink driving the clock, as AAudio does on Android.
-            log::warn!("video: the FFmpeg backend plays no sound on iOS yet");
-        }
         let slot = Arc::new(Mutex::new(None));
         let (mut video, _) = super::ffmpeg::FfmpegVideo::open(path, (!software).then_some(()), slot.clone())?;
+        let audio = if info.has_audio {
+            super::ffmpeg::FfmpegAudio::open(path)
+                .map_err(|error| log::warn!("video: audio stream skipped: {error:#}"))
+                .ok()
+        } else {
+            None
+        };
         log::info!(
-            "video: FFmpeg playing {}x{} (rotated {}°) from {path:?}",
+            "video: FFmpeg playing {}x{} (rotated {}°, audio {}) from {path:?}",
             info.width,
             info.height,
-            info.rotation
+            info.rotation,
+            audio.is_some(),
         );
-        let shared = Shared::new(false);
-        let thread = std::thread::Builder::new().name("gpui-video".into()).spawn({
+        let shared = Shared::new(audio.is_some());
+        let mut threads = vec![std::thread::Builder::new().name("gpui-video".into()).spawn({
             let shared = shared.clone();
             move || {
                 if let Err(error) = play_video(&mut video, &shared) {
                     log::error!("video: decoding stopped: {error:#}");
                 }
             }
-        })?;
+        })?];
+        if let Some(mut audio) = audio {
+            threads.push(std::thread::Builder::new().name("gpui-audio".into()).spawn({
+                let shared = shared.clone();
+                move || {
+                    if let Err(error) = play_audio::<AudioQueue>(&mut audio, &shared) {
+                        log::error!("video: audio stopped: {error:#}");
+                    }
+                    // The video goes on by the monotonic clock.
+                    shared.update(|state| {
+                        state.audio = false;
+                        state.holding = false;
+                    });
+                }
+            })?);
+            audio_session_acquire();
+        }
         let (width, height) =
             if info.rotation % 180 == 90 { (info.height, info.width) } else { (info.width, info.height) };
         Ok(Self {
@@ -488,8 +510,9 @@ impl FfmpegPlayer {
             },
             rotation: info.rotation,
             duration_us: info.duration_us,
+            has_audio: threads.len() > 1,
             shared,
-            thread: Some(thread),
+            threads,
             slot,
             cache: RefCell::new(None),
             uploader: RefCell::new(Uploader::default()),
@@ -587,10 +610,288 @@ impl FfmpegPlayer {
 impl Drop for FfmpegPlayer {
     fn drop(&mut self) {
         self.shared.update(|state| state.stop = true);
-        if self.thread.take().is_some_and(|thread| thread.join().is_err()) {
-            log::error!("video: playback thread panicked");
+        for thread in self.threads.drain(..) {
+            if thread.join().is_err() {
+                log::error!("video: playback thread panicked");
+            }
+        }
+        if self.has_audio {
+            audio_session_release();
         }
     }
+}
+
+/// Audio output for the FFmpeg backend: an AudioQueue fed 16-bit PCM in
+/// small buffers. A buffer's callback means its frames have played, which
+/// gives the clock its timestamps.
+#[cfg(feature = "ffmpeg")]
+struct AudioQueue {
+    queue: *mut c_void,
+    rate: i32,
+    channels: i32,
+    capacity_frames: usize,
+    /// Boxed so the callback's pointer to it stays put.
+    state: Box<QueueState>,
+    started: Cell<bool>,
+}
+
+#[cfg(feature = "ffmpeg")]
+struct QueueState {
+    buffers: Mutex<QueueBuffers>,
+    freed: Condvar,
+    bytes_per_frame: u32,
+}
+
+#[cfg(feature = "ffmpeg")]
+struct QueueBuffers {
+    /// Buffers not enqueued (`AudioQueueBufferRef`s as addresses).
+    free: Vec<usize>,
+    /// Bumped by a flush; buffers enqueued before it don't count as played.
+    epoch: usize,
+    written: i64,
+    played: i64,
+    /// When `played` was last reached, on the monotonic clock.
+    played_at: Option<i64>,
+}
+
+/// Buffers in the queue, and frames in each: about 85 ms ahead at 48 kHz.
+#[cfg(feature = "ffmpeg")]
+const QUEUE_BUFFERS: usize = 4;
+#[cfg(feature = "ffmpeg")]
+const QUEUE_BUFFER_FRAMES: usize = 1024;
+
+#[cfg(feature = "ffmpeg")]
+impl AudioQueue {
+    fn lock(&self) -> std::sync::MutexGuard<'_, QueueBuffers> {
+        self.state.buffers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
+extern "C" fn queue_buffer_done(user: *mut c_void, _queue: *mut c_void, buffer: *mut AudioQueueBuffer) {
+    // SAFETY: `user` is the queue's boxed state, alive until the queue is
+    // disposed; the buffer belongs to the queue.
+    unsafe {
+        let state = &*(user as *const QueueState);
+        let mut buffers = state.buffers.lock().unwrap_or_else(PoisonError::into_inner);
+        if (*buffer).user_data as usize == buffers.epoch {
+            buffers.played += ((*buffer).audio_data_byte_size / state.bytes_per_frame) as i64;
+            buffers.played_at = Some(super::player::monotonic_ns());
+        }
+        buffers.free.push(buffer as usize);
+        drop(buffers);
+        state.freed.notify_all();
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
+impl AudioSink for AudioQueue {
+    fn open(rate: i32, channels: i32) -> Result<Self> {
+        let bytes_per_frame = 2 * channels as u32;
+        let format = AudioStreamBasicDescription {
+            sample_rate: rate as f64,
+            format_id: u32::from_be_bytes(*b"lpcm"),
+            // Signed integer, packed.
+            format_flags: 4 | 8,
+            bytes_per_packet: bytes_per_frame,
+            frames_per_packet: 1,
+            bytes_per_frame,
+            channels_per_frame: channels as u32,
+            bits_per_channel: 16,
+            reserved: 0,
+        };
+        let state = Box::new(QueueState {
+            buffers: Mutex::new(QueueBuffers {
+                free: Vec::new(),
+                epoch: 0,
+                written: 0,
+                played: 0,
+                played_at: None,
+            }),
+            freed: Condvar::new(),
+            bytes_per_frame,
+        });
+        let mut queue = ptr::null_mut();
+        // SAFETY: the callback runs on the queue's own thread, with the boxed
+        // state, which `Drop` keeps until the queue is disposed.
+        let status = unsafe {
+            AudioQueueNewOutput(
+                &format,
+                queue_buffer_done,
+                &*state as *const QueueState as *mut c_void,
+                ptr::null_mut(),
+                ptr::null(),
+                0,
+                &mut queue,
+            )
+        };
+        if status != 0 || queue.is_null() {
+            bail!("AudioQueueNewOutput: {status}");
+        }
+        let sink = Self {
+            queue,
+            rate,
+            channels,
+            capacity_frames: QUEUE_BUFFER_FRAMES,
+            state,
+            started: Cell::new(false),
+        };
+        for _ in 0..QUEUE_BUFFERS {
+            let mut buffer = ptr::null_mut();
+            // SAFETY: a live queue; the buffer belongs to it.
+            let status =
+                unsafe { AudioQueueAllocateBuffer(queue, QUEUE_BUFFER_FRAMES as u32 * bytes_per_frame, &mut buffer) };
+            if status != 0 {
+                bail!("AudioQueueAllocateBuffer: {status}");
+            }
+            sink.lock().free.push(buffer as usize);
+        }
+        log::info!("video: audio through an AudioQueue, {rate} Hz, {channels} channels");
+        Ok(sink)
+    }
+
+    fn rate(&self) -> i32 {
+        self.rate
+    }
+
+    fn channels(&self) -> i32 {
+        self.channels
+    }
+
+    fn follow(&self, running: bool) {
+        if running == self.started.get() {
+            return;
+        }
+        // SAFETY: a live queue.
+        let status = unsafe {
+            if running {
+                AudioQueueStart(self.queue, ptr::null())
+            } else {
+                AudioQueuePause(self.queue)
+            }
+        };
+        if status != 0 {
+            log::warn!("video: AudioQueue {}: {status}", if running { "start" } else { "pause" });
+        }
+        self.started.set(running);
+    }
+
+    fn pause_and_flush(&self) {
+        self.follow(false);
+        let mut buffers = self.lock();
+        buffers.epoch += 1;
+        buffers.played = buffers.written;
+        buffers.played_at = None;
+        drop(buffers);
+        // SAFETY: a live queue; its callbacks hand back the dropped buffers.
+        unsafe { AudioQueueReset(self.queue) };
+    }
+
+    fn frames_written(&self) -> i64 {
+        self.lock().written
+    }
+
+    unsafe fn write(&self, data: *const i16, frames: usize) -> Result<usize> {
+        let mut buffers = self.lock();
+        if buffers.free.is_empty() {
+            buffers = self
+                .state
+                .freed
+                .wait_timeout(buffers, super::player::POLL)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        let Some(buffer) = buffers.free.pop() else {
+            return Ok(0);
+        };
+        let buffer = buffer as *mut AudioQueueBuffer;
+        let count = frames.min(self.capacity_frames);
+        // SAFETY: the buffer is ours until enqueued and holds
+        // `capacity_frames` frames; the caller vouches for `data`.
+        unsafe {
+            ptr::copy_nonoverlapping(data, (*buffer).audio_data.cast::<i16>(), count * self.channels as usize);
+            (*buffer).audio_data_byte_size = count as u32 * self.state.bytes_per_frame;
+            (*buffer).user_data = buffers.epoch as *mut c_void;
+        }
+        buffers.written += count as i64;
+        drop(buffers);
+        // SAFETY: a live queue and one of its buffers.
+        let status = unsafe { AudioQueueEnqueueBuffer(self.queue, buffer, 0, ptr::null()) };
+        if status != 0 {
+            let mut buffers = self.lock();
+            buffers.free.push(buffer as usize);
+            buffers.written -= count as i64;
+            bail!("AudioQueueEnqueueBuffer: {status}");
+        }
+        Ok(count)
+    }
+
+    fn timestamp(&self) -> Option<(i64, i64)> {
+        let buffers = self.lock();
+        buffers.played_at.map(|time| (buffers.played, time))
+    }
+}
+
+#[cfg(feature = "ffmpeg")]
+impl Drop for AudioQueue {
+    fn drop(&mut self) {
+        // SAFETY: owned queue, disposed at once (with its buffers) before the
+        // state its callback uses drops.
+        unsafe { AudioQueueDispose(self.queue, true) };
+    }
+}
+
+/// `AudioStreamBasicDescription`.
+#[cfg(feature = "ffmpeg")]
+#[repr(C)]
+struct AudioStreamBasicDescription {
+    sample_rate: f64,
+    format_id: u32,
+    format_flags: u32,
+    bytes_per_packet: u32,
+    frames_per_packet: u32,
+    bytes_per_frame: u32,
+    channels_per_frame: u32,
+    bits_per_channel: u32,
+    reserved: u32,
+}
+
+/// `AudioQueueBuffer`.
+#[cfg(feature = "ffmpeg")]
+#[repr(C)]
+struct AudioQueueBuffer {
+    audio_data_bytes_capacity: u32,
+    audio_data: *mut c_void,
+    audio_data_byte_size: u32,
+    user_data: *mut c_void,
+    packet_description_capacity: u32,
+    packet_descriptions: *mut c_void,
+    packet_description_count: u32,
+}
+
+#[cfg(feature = "ffmpeg")]
+#[link(name = "AudioToolbox", kind = "framework")]
+extern "C" {
+    fn AudioQueueNewOutput(
+        format: *const AudioStreamBasicDescription,
+        callback: extern "C" fn(*mut c_void, *mut c_void, *mut AudioQueueBuffer),
+        user_data: *mut c_void,
+        run_loop: *mut c_void,
+        run_loop_mode: *const c_void,
+        flags: u32,
+        queue_out: *mut *mut c_void,
+    ) -> i32;
+    fn AudioQueueAllocateBuffer(queue: *mut c_void, byte_size: u32, buffer_out: *mut *mut AudioQueueBuffer) -> i32;
+    fn AudioQueueEnqueueBuffer(
+        queue: *mut c_void,
+        buffer: *mut AudioQueueBuffer,
+        packet_descriptions: u32,
+        descriptions: *const c_void,
+    ) -> i32;
+    fn AudioQueueStart(queue: *mut c_void, start_time: *const c_void) -> i32;
+    fn AudioQueuePause(queue: *mut c_void) -> i32;
+    fn AudioQueueReset(queue: *mut c_void) -> i32;
+    fn AudioQueueDispose(queue: *mut c_void, immediate: bool) -> i32;
 }
 
 impl Drop for Player {

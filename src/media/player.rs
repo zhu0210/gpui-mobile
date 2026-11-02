@@ -6,7 +6,7 @@
 //! monotonic clock otherwise. The video thread shows each frame once the clock
 //! reaches its timestamp.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 pub(super) const LATE_US: i64 = 50_000;
 /// How long the playback threads wait before looking at the state again.
 pub(super) const POLL: Duration = Duration::from_millis(20);
+/// How long a seek waits for the audio stream's first timestamp.
+const HOLD_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub(super) fn monotonic_ns() -> i64 {
     let mut time = libc::timespec {
@@ -192,7 +194,6 @@ impl Shared {
     /// Moves the clock to the audio stream's timestamp: `media_us` was heard
     /// at `time_ns`.
     /// The first one after a seek ends the hold and starts the clock there.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub fn sync(&self, generation: u64, media_us: i64, time_ns: i64) {
         let mut state = self.lock();
         if state.seek_generation != generation {
@@ -320,6 +321,149 @@ pub(super) fn play_video<S: VideoSource>(source: &mut S, shared: &Shared) -> Res
             shared.wait_until(generation, pts).is_some_and(|late| late <= LATE_US)
         };
         source.release(frame, render)?;
+    }
+}
+
+
+/// What an audio source produced.
+pub(super) enum AudioOutput {
+    Pending,
+    End,
+    /// The output switched to this sample rate and channel count.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    Format((i32, i32)),
+    /// Interleaved 16-bit samples, valid until `release`.
+    Samples { pts: i64, data: *const i16, frames: usize },
+}
+
+pub(super) trait AudioSource {
+    /// The sample rate and channel count before any `Format` output.
+    fn format(&self) -> Result<(i32, i32)>;
+    fn seek(&mut self, target_us: i64) -> Result<()>;
+    fn next(&mut self) -> Result<AudioOutput>;
+    /// Gives back the samples of the last `Samples` output.
+    fn release(&mut self) -> Result<()>;
+}
+
+/// Where `play_audio` writes: AAudio on Android, an AudioQueue on iOS.
+pub(super) trait AudioSink: Sized {
+    /// Opens 16-bit interleaved PCM output at `rate` with `channels` channels.
+    fn open(rate: i32, channels: i32) -> Result<Self>;
+    fn rate(&self) -> i32;
+    fn channels(&self) -> i32;
+    /// Starts or pauses the output to match the clock.
+    fn follow(&self, running: bool);
+    /// Pauses and drops what has not played.
+    fn pause_and_flush(&self);
+    fn frames_written(&self) -> i64;
+    /// Writes up to `frames` frames from `data`, waiting at most about
+    /// [`POLL`] for room; returns how many it took.
+    ///
+    /// # Safety
+    /// `data` must hold `frames` frames.
+    unsafe fn write(&self, data: *const i16, frames: usize) -> Result<usize>;
+    /// The frame position last presented, and when, on the monotonic clock.
+    fn timestamp(&self) -> Option<(i64, i64)>;
+}
+
+/// Decodes audio and writes it to the sink, which paces the thread; the
+/// sink's timestamps drive the clock.
+pub(super) fn play_audio<S: AudioSink>(source: &mut dyn AudioSource, shared: &Shared) -> Result<()> {
+    let mut stream: Option<S> = None;
+    let (mut generation, mut target) = (0, 0);
+    // When the first samples since the last seek went to the stream.
+    let mut first_write: Option<Instant> = None;
+    // Frames written before the first sample since the last seek, and its time.
+    let mut base: Option<(i64, i64)> = None;
+    let mut end_us = 0;
+    loop {
+        let state = shared.lock();
+        if state.stop {
+            return Ok(());
+        }
+        if state.seek_generation != generation {
+            generation = state.seek_generation;
+            target = state.seek_target_us;
+            drop(state);
+            source.seek(target)?;
+            if let Some(stream) = &stream {
+                stream.pause_and_flush();
+            }
+            (first_write, base) = (None, None);
+            continue;
+        }
+        let (running, holding, finished) = (state.running, state.holding, state.audio_end_us.is_some());
+        if let Some(stream) = &stream {
+            stream.follow(state.wants_sound());
+        }
+        if (!running && !holding) || finished {
+            drop(shared.wait(state, POLL));
+            continue;
+        }
+        drop(state);
+
+        let (mut pts, data, frames) = match source.next()? {
+            AudioOutput::Pending => continue,
+            AudioOutput::Format((rate, channels)) => {
+                stream = Some(S::open(rate, channels)?);
+                continue;
+            }
+            AudioOutput::End => {
+                shared.update(|state| {
+                    if state.seek_generation == generation {
+                        state.audio_end_us = Some(end_us.max(target));
+                        state.holding = false;
+                    }
+                });
+                continue;
+            }
+            AudioOutput::Samples { pts, data, frames } => (pts, data, frames),
+        };
+        if stream.is_none() {
+            let (rate, channels) = source.format()?;
+            stream = Some(S::open(rate, channels)?);
+        }
+        let stream = stream.as_ref().ok_or_else(|| anyhow!("no audio stream"))?;
+        let (rate, channels) = (stream.rate() as i64, stream.channels() as usize);
+        let mut offset = 0;
+        if pts < target {
+            offset = (((target - pts) * rate / 1_000_000) as usize).min(frames);
+            pts += offset as i64 * 1_000_000 / rate;
+        }
+        if offset < frames {
+            let (base_frames, base_us) = *base.get_or_insert((stream.frames_written(), pts));
+            end_us = pts + (frames - offset) as i64 * 1_000_000 / rate;
+            while offset < frames {
+                let state = shared.lock();
+                if state.stop || state.seek_generation != generation {
+                    break;
+                }
+                let sound = state.wants_sound();
+                drop(state);
+                stream.follow(sound);
+                // Blocks while the stream's buffer is full, which paces this thread.
+                // SAFETY: the source keeps `frames` frames at `data` until `release`.
+                let written = unsafe { stream.write(data.add(offset * channels), frames - offset)? };
+                offset += written;
+                if written > 0 {
+                    first_write.get_or_insert_with(Instant::now);
+                }
+                // Without timestamps the clock starts on its own.
+                if first_write.is_some_and(|time| time.elapsed() > HOLD_TIMEOUT) {
+                    shared.update(|state| {
+                        if state.seek_generation == generation {
+                            state.holding = false;
+                        }
+                    });
+                }
+                if let Some((frame, time_ns)) = stream.timestamp() {
+                    if frame >= base_frames {
+                        shared.sync(generation, base_us + (frame - base_frames) * 1_000_000 / rate, time_ns);
+                    }
+                }
+            }
+        }
+        source.release()?;
     }
 }
 
