@@ -1669,12 +1669,15 @@ impl PlatformWindow for AndroidPlatformWindow {
         // Android windows are always fullscreen.
     }
 
+    /// The window always fills the screen; "full screen" hides the status and navigation bars
+    /// as well, until a swipe from the edge brings them back for a moment.
     fn toggle_fullscreen(&self) {
-        // Android windows are always fullscreen.
+        let on = !super::jni::immersive();
+        super::jni::set_immersive(on);
     }
 
     fn is_fullscreen(&self) -> bool {
-        true
+        super::jni::immersive()
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {

@@ -94,6 +94,9 @@ static TEXT_INPUT_VIEW_CLASS_REGISTERED: std::sync::Once = std::sync::Once::new(
 /// Accessed from the main thread only.
 static STATUS_BAR_STYLE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
+/// "Full screen" on a phone: the status bar and the home indicator stay out of the way.
+static IMMERSIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Register a custom UIViewController subclass that allows overriding
 /// `preferredStatusBarStyle` at runtime.
 fn register_view_controller_class() -> &'static AnyClass {
@@ -109,6 +112,10 @@ fn register_view_controller_class() -> &'static AnyClass {
             } else {
                 3 // UIStatusBarStyleDarkContent (iOS 13+)
             }
+        }
+
+        extern "C" fn prefers_hidden(_this: *mut AnyObject, _sel: Sel) -> bool {
+            IMMERSIVE.load(std::sync::atomic::Ordering::Relaxed)
         }
 
         // Override viewDidLayoutSubviews — called by UIKit on rotation,
@@ -139,6 +146,8 @@ fn register_view_controller_class() -> &'static AnyClass {
                 sel!(preferredStatusBarStyle),
                 preferred_status_bar_style as extern "C" fn(*mut AnyObject, Sel) -> isize,
             );
+            decl.add_method(sel!(prefersStatusBarHidden), prefers_hidden as extern "C" fn(*mut AnyObject, Sel) -> bool);
+            decl.add_method(sel!(prefersHomeIndicatorAutoHidden), prefers_hidden as extern "C" fn(*mut AnyObject, Sel) -> bool);
             decl.add_method(
                 sel!(viewDidLayoutSubviews),
                 view_did_layout_subviews as extern "C" fn(*mut AnyObject, Sel),
@@ -1578,12 +1587,27 @@ impl PlatformWindow for IosWindow {
         // iOS apps cannot be zoomed
     }
 
+    /// The window always fills the screen; "full screen" hides the status bar and the home
+    /// indicator as well.
     fn toggle_fullscreen(&self) {
-        // iOS apps are always fullscreen
+        IMMERSIVE.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+        let vc = self.view_controller;
+        if !vc.is_null() {
+            unsafe {
+                let _: () = msg_send![vc, setNeedsStatusBarAppearanceUpdate];
+                let _: () = msg_send![vc, setNeedsUpdateOfHomeIndicatorAutoHidden];
+                // Embedded, a host's controller asks this one (`childForStatusBarHidden`).
+                let parent: *mut AnyObject = msg_send![vc, parentViewController];
+                if !parent.is_null() {
+                    let _: () = msg_send![parent, setNeedsStatusBarAppearanceUpdate];
+                    let _: () = msg_send![parent, setNeedsUpdateOfHomeIndicatorAutoHidden];
+                }
+            }
+        }
     }
 
     fn is_fullscreen(&self) -> bool {
-        true
+        IMMERSIVE.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
