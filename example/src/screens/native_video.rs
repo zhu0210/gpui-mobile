@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
 use gpui::{canvas, div, prelude::*, px, rgb, rgba, AnyElement, App, Corners, MouseDownEvent, Window};
-use gpui_mobile::media::{Backend, VideoFrames};
+use gpui_mobile::media::{Backend, Track, VideoFrames};
 
 use super::{BLUE, GREEN, SUBTEXT, SURFACE0, TEXT};
 
@@ -54,7 +54,18 @@ const CLIPS: &[(&str, Clip)] = &[
             ("clip2.ts", include_bytes!("../../assets/video/hls/clip2.ts")),
         ]),
     ),
+    (
+        // Two audio tracks and two MP4 text subtitle tracks; the platform's
+        // player plays the first audio track only.
+        "Tracks & subtitles",
+        Clip::Bundled("tracks.mp4", include_bytes!("../../assets/video/tracks.mp4")),
+    ),
 ];
+
+/// The speeds the speed button steps through.
+const RATES: &[f32] = &[1.0, 1.5, 2.0, 0.5];
+/// The heights the size cap button steps through.
+const MAX_HEIGHTS: &[Option<u32>] = &[None, Some(120), Some(90)];
 
 /// The decoders to choose from: name and backend.
 const BACKENDS: &[(&str, Backend)] = &[
@@ -67,6 +78,8 @@ const BACKENDS: &[(&str, Backend)] = &[
 
 thread_local! {
     static VIDEO: RefCell<Option<Result<VideoFrames, String>>> = const { RefCell::new(None) };
+    // The index into MAX_HEIGHTS (kept across clips, unlike the rest).
+    static MAX_HEIGHT: Cell<usize> = const { Cell::new(0) };
     // Smoke tests pick the first clip with GPUI_VIDEO_CLIP, e.g. 1 for the
     // rotated one.
     static CLIP: Cell<usize> = Cell::new(
@@ -117,6 +130,17 @@ fn open_clip(index: usize) -> Result<VideoFrames, String> {
     }
     .map_err(|error| format!("{error:#}"))?;
     video.set_looping(true);
+    // Smoke tests try the controls with GPUI_VIDEO_CONTROLS=1: 1.5×, the last
+    // audio track, the first subtitles, frames capped at 120 px.
+    if std::env::var("GPUI_VIDEO_CONTROLS").is_ok_and(|value| value == "1") {
+        video.set_rate(1.5);
+        if let Some(track) = video.audio_tracks().last() {
+            video.set_audio_track(track.id);
+        }
+        video.set_subtitle_track(video.subtitle_tracks().first().map(|track| track.id));
+        MAX_HEIGHT.with(|height| height.set(1));
+    }
+    video.set_max_height(MAX_HEIGHTS[MAX_HEIGHT.with(Cell::get)]);
     Ok(video)
 }
 
@@ -155,6 +179,21 @@ fn button(
         .on_mouse_down(gpui::MouseButton::Left, handler)
 }
 
+/// A track as a button shows it: its title and language, or its id.
+fn track_name(track: &Track) -> String {
+    match (&track.title, &track.language) {
+        (Some(title), Some(language)) => format!("{title} ({language})"),
+        (Some(name), None) | (None, Some(name)) => name.clone(),
+        (None, None) => format!("#{}", track.id),
+    }
+}
+
+/// The track after `current` in `tracks`, wrapping round.
+fn next_track(tracks: &[Track], current: Option<usize>) -> Option<&Track> {
+    let index = tracks.iter().position(|track| Some(track.id) == current);
+    tracks.get(index.map_or(0, |index| (index + 1) % tracks.len()))
+}
+
 fn clock(time: Duration) -> String {
     let seconds = time.as_secs();
     format!("{}:{:02}.{}", seconds / 60, seconds % 60, time.subsec_millis() / 100)
@@ -162,23 +201,37 @@ fn clock(time: Duration) -> String {
 
 pub fn render(_cx: &App) -> AnyElement {
     let clip = CLIP.with(Cell::get);
-    let (status, size, paused) = VIDEO.with(|video| {
+    let (status, size, paused, controls) = VIDEO.with(|video| {
         let mut video = video.borrow_mut();
         match video.get_or_insert_with(|| open_clip(clip)) {
             Ok(video) => (
                 format!(
-                    "{} / {} · frames imported: {}{}",
+                    "{} / {} · buffered {} · frames imported: {}{}",
                     clock(video.position()),
                     clock(video.duration()),
+                    clock(video.buffered()),
                     video.frames_shown(),
                     if video.ended() { " · ended" } else { "" }
                 ),
                 video.video_size(),
                 video.is_paused(),
+                Some((
+                    video.rate(),
+                    video.is_muted(),
+                    video.volume(),
+                    video.audio_tracks(),
+                    video.audio_track(),
+                    video.subtitle_tracks(),
+                    video.subtitle_track(),
+                    video.subtitle_text(),
+                )),
             ),
-            Err(error) => (format!("Error: {error}"), Default::default(), true),
+            Err(error) => (format!("Error: {error}"), Default::default(), true, None),
         }
     });
+    let (rate, muted, volume, audio_tracks, audio_track, subtitle_tracks, subtitle_track, subtitle) =
+        controls.unwrap_or((1.0, false, 1.0, Vec::new(), None, Vec::new(), None, None));
+    let max_height = MAX_HEIGHT.with(Cell::get);
     let aspect = if size.width.0 > 0 {
         size.width.0 as f32 / size.height.0 as f32
     } else {
@@ -254,7 +307,23 @@ pub fn render(_cx: &App) -> AnyElement {
                         .text_xs()
                         .text_color(rgb(TEXT))
                         .child(format!("GPUI overlay · {}x{}", size.width.0, size.height.0)),
-                ),
+                )
+                // The chosen subtitles, drawn by the app.
+                .when_some(subtitle, |this, text| {
+                    this.child(
+                        div().absolute().bottom_3().left_0().right_0().flex().justify_center().child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgba(0x000000cc))
+                                .text_sm()
+                                .text_color(rgb(0xffffff))
+                                .text_center()
+                                .children(text.lines().map(|line| div().child(line.to_owned())).collect::<Vec<_>>()),
+                        ),
+                    )
+                }),
         )
         .child(
             div()
@@ -283,6 +352,76 @@ pub fn render(_cx: &App) -> AnyElement {
                     with_video(|video| video.seek(video.position() + Duration::from_secs(10))),
                 ))
                 .child(button("Restart", BLUE, with_video(|video| video.seek(Duration::ZERO)))),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(button(
+                    format!("Speed {rate}×"),
+                    BLUE,
+                    with_video(|video| {
+                        let index = RATES.iter().position(|&rate| rate == video.rate()).unwrap_or(0);
+                        video.set_rate(RATES[(index + 1) % RATES.len()]);
+                    }),
+                ))
+                .child(button(
+                    if muted { "Unmute" } else { "Mute" },
+                    BLUE,
+                    with_video(|video| video.set_muted(!video.is_muted())),
+                ))
+                .child(button(
+                    format!("Volume {:.0}%", volume * 100.0),
+                    BLUE,
+                    with_video(|video| video.set_volume(if video.volume() > 0.3 { video.volume() / 2.0 } else { 1.0 })),
+                ))
+                .child(button(
+                    match MAX_HEIGHTS[max_height] {
+                        Some(height) => format!("Max {height}p"),
+                        None => "Full size".into(),
+                    },
+                    BLUE,
+                    with_video(|video| {
+                        let next = (MAX_HEIGHT.with(Cell::get) + 1) % MAX_HEIGHTS.len();
+                        MAX_HEIGHT.with(|height| height.set(next));
+                        video.set_max_height(MAX_HEIGHTS[next]);
+                    }),
+                ))
+                .when(audio_tracks.len() > 1, |this| {
+                    let name = audio_tracks
+                        .iter()
+                        .find(|track| Some(track.id) == audio_track)
+                        .map_or_else(|| "?".into(), track_name);
+                    this.child(button(
+                        format!("Audio: {name}"),
+                        BLUE,
+                        with_video(|video| {
+                            if let Some(track) = next_track(&video.audio_tracks(), video.audio_track()) {
+                                video.set_audio_track(track.id);
+                            }
+                        }),
+                    ))
+                })
+                .when(!subtitle_tracks.is_empty(), |this| {
+                    let name = subtitle_tracks
+                        .iter()
+                        .find(|track| Some(track.id) == subtitle_track)
+                        .map_or_else(|| "off".into(), track_name);
+                    this.child(button(
+                        format!("Subtitles: {name}"),
+                        BLUE,
+                        with_video(|video| {
+                            // Off after the last track.
+                            let tracks = video.subtitle_tracks();
+                            let next = match video.subtitle_track() {
+                                Some(id) if tracks.last().is_some_and(|track| track.id == id) => None,
+                                current => next_track(&tracks, current).map(|track| track.id),
+                            };
+                            video.set_subtitle_track(next);
+                        }),
+                    ))
+                }),
         )
         .child(div().text_sm().text_color(rgb(TEXT)).child(status))
         .into_any_element()
