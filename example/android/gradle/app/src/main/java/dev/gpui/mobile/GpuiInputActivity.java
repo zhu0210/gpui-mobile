@@ -64,10 +64,19 @@ public class GpuiInputActivity extends NativeActivity {
             input.requestFocus();
             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
             imm.restartInput(input);
-            imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
-            // The proxy keeps focus from one field to the next, so autofill must be asked.
-            AutofillManager autofill = getSystemService(AutofillManager.class);
-            if (credential && autofill != null) autofill.requestAutofill(input);
+            // Posted: the first time, the proxy was only just added and is not attached yet, and
+            // the IME ignores a request for a view without a window (the first tap did nothing).
+            input.post(() -> {
+                imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+                // The proxy keeps focus from one field to the next, so tell autofill a field was
+                // entered, as a focus change would. Asking it outright showed its picker in
+                // place of the keyboard.
+                AutofillManager autofill = getSystemService(AutofillManager.class);
+                if (credential && autofill != null) {
+                    autofill.notifyViewExited(input);
+                    autofill.notifyViewEntered(input);
+                }
+            });
         });
     }
 
