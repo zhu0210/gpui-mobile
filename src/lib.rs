@@ -76,6 +76,8 @@ pub mod components;
 pub(crate) mod fling_guard;
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 pub(crate) mod frame_demand;
+#[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
+pub(crate) mod pinch;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) mod frame_pacer;
 pub mod momentum;

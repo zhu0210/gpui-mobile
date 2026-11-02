@@ -13,6 +13,7 @@
 use super::events::*;
 use super::IosDisplay;
 use crate::fling_guard::FlingGuard;
+use crate::pinch::{Pinch, Relayed};
 use crate::frame_demand::FrameDemand;
 
 use gpui::{
@@ -631,6 +632,8 @@ pub(crate) struct IosWindow {
     active_touches: RefCell<HashMap<usize, gpui::TouchId>>,
     next_touch_id: Cell<u64>,
     fling_guard: RefCell<FlingGuard>,
+    /// Turns two fingers into pinches, which GPUI doesn't recognize yet.
+    pinch: RefCell<Pinch>,
     /// The wgpu renderer (Metal backend on iOS).
     /// Wrapped in a `Mutex<Option<…>>` so that `draw()` (called from the
     /// `request_frame` callback) can acquire a mutable reference without
@@ -765,6 +768,7 @@ impl IosWindow {
                 active_touches: RefCell::new(HashMap::new()),
                 next_touch_id: Cell::new(0),
                 fling_guard: RefCell::new(FlingGuard::new()),
+                pinch: RefCell::new(Pinch::new()),
                 renderer: Mutex::new(None),
             };
 
@@ -984,13 +988,20 @@ impl IosWindow {
                 predicted_position: None,
                 force: None,
             };
-            self.fling_guard.borrow_mut().relay(
-                event,
-                || self.next_touch_id(),
-                |event| {
-                    callback(PlatformInput::Touch(event));
-                },
-            );
+            for relayed in self.pinch.borrow_mut().relay(event) {
+                match relayed {
+                    Relayed::Touch(event) => self.fling_guard.borrow_mut().relay(
+                        event,
+                        || self.next_touch_id(),
+                        |event| {
+                            callback(PlatformInput::Touch(event));
+                        },
+                    ),
+                    Relayed::Pinch(pinch) => {
+                        callback(PlatformInput::Pinch(pinch));
+                    }
+                }
+            }
         }
         if matches!(phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled) {
             self.active_touches.borrow_mut().remove(&key);
