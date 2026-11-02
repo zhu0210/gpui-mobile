@@ -180,13 +180,16 @@ jobs:
             read -r backend clip name <<<"$run"
             xcrun simctl terminate "$sim" dev.gpui.mobile.example || true
             SIMCTL_CHILD_GPUI_INITIAL_SCREEN=native_video SIMCTL_CHILD_GPUI_VIDEO_CLIP=$clip \
-              SIMCTL_CHILD_GPUI_VIDEO_BACKEND=$backend xcrun simctl launch "$sim" dev.gpui.mobile.example
+              SIMCTL_CHILD_GPUI_VIDEO_BACKEND=$backend xcrun simctl launch \
+              --stderr="$PWD/smoke/native-video-$name-stderr.txt" "$sim" dev.gpui.mobile.example
             sleep 15
             xcrun simctl io "$sim" screenshot "smoke/native-video-$name.png"
             xcrun simctl spawn "$sim" log show --last 1m --style compact \
               --predicate 'process == "GpuiExample"' > "smoke/native-video-$name-log.txt" || true
             echo "== $name"
-            grep -E "video:|panic|mediacodec|videotoolbox" "smoke/native-video-$name-log.txt" | tail -20 || true
+            grep -E "video:|panic" "smoke/native-video-$name-log.txt" | tail -20 || true
+            # FFmpeg's own messages go to stderr.
+            tail -20 "smoke/native-video-$name-stderr.txt" || true
           done
 
       - name: Upload screenshot and logs
