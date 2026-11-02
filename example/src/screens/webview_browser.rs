@@ -17,6 +17,8 @@ const APP_BAR_HEIGHT: f32 = 56.0;
 pub struct WebViewState {
     pub url: String,
     pub handle: Option<gpui_mobile::packages::webview::WebViewHandle>,
+    /// What the sign-in stand-in handed back through the intercept.
+    pub signed_in: Option<String>,
 }
 
 impl Default for WebViewState {
@@ -24,6 +26,7 @@ impl Default for WebViewState {
         Self {
             url: String::new(),
             handle: None,
+            signed_in: None,
         }
     }
 }
@@ -204,6 +207,7 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                         }),
                     ),
             )
+            .child(signin_redirect_btn(router, cx))
             // Status
             .child(
                 div()
@@ -291,4 +295,70 @@ fn open_url_btn(
                 cx.notify();
             }),
         )
+}
+
+/// Where the sign-in stand-in sends its answer: the Tauri app's own origin, which a
+/// real captcha page redirects to.
+const SIGNIN_REDIRECT: &str = "http://tauri.localhost/captcha-done.html";
+
+/// A local stand-in for a captcha page: it "solves" itself and redirects with a
+/// synthetic token, which the WebView's intercept stops and hands to the app.
+fn signin_redirect_btn(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoElement {
+    let signed_in = WEBVIEW_STATE.with(|s| s.borrow().signed_in.clone());
+    let label = match signed_in {
+        Some(url) => format!("Signed in: {url}"),
+        None => "Sign-in redirect (stand-in)".to_string(),
+    };
+    let _ = router;
+    div()
+        .id("signin-redirect")
+        .flex()
+        .items_center()
+        .justify_center()
+        .px_4()
+        .py_3()
+        .rounded_xl()
+        .bg(rgb(0x7B8CF8))
+        .child(div().text_sm().text_color(rgb(0xFFFFFF)).child(label))
+        .on_click(cx.listener(|this, _, _, cx| {
+            let mut settings = gpui_mobile::packages::webview::WebViewSettings::default();
+            settings.top_offset = this.safe_area.top + APP_BAR_HEIGHT;
+            settings.intercept = Some(SIGNIN_REDIRECT.to_string());
+            let html = format!(
+                r#"<html><body style="background:#1e1f25;color:#e2e2e9;font-family:system-ui;padding:24px"><h2>Stand-in captcha</h2><p>Solving…</p><script>setTimeout(function(){{location.href="{SIGNIN_REDIRECT}?captcha_token=synthetic-token&expires_in=300&state=demo"}},1500)</script></body></html>"#
+            );
+            match gpui_mobile::packages::webview::load_html(&html, &settings) {
+                Ok(handle) => WEBVIEW_STATE.with(|s| {
+                    let mut state = s.borrow_mut();
+                    state.url = "stand-in captcha".into();
+                    state.signed_in = None;
+                    state.handle = Some(handle);
+                }),
+                Err(e) => log::error!("WebView HTML error: {e}"),
+            }
+            // Wait for the redirect the intercept stops, then close the page.
+            cx.spawn(async move |router, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+                    let taken = WEBVIEW_STATE.with(|s| {
+                        let state = s.borrow();
+                        let handle = state.handle.as_ref()?;
+                        Some(handle.take_intercepted())
+                    });
+                    match taken {
+                        None => return,
+                        Some(None) => continue,
+                        Some(Some(url)) => {
+                            log::info!("webview: intercepted {url}");
+                            dismiss_webview();
+                            WEBVIEW_STATE.with(|s| s.borrow_mut().signed_in = Some(url));
+                            router.update(cx, |_, cx| cx.notify()).ok();
+                            return;
+                        }
+                    }
+                }
+            })
+            .detach();
+            cx.notify();
+        }))
 }

@@ -7,6 +7,7 @@ import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.WebSettings;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebChromeClient;
@@ -28,6 +29,16 @@ import java.util.Map;
 public class GpuiPlatformView {
     private static final String TAG = "GpuiPlatformView";
     private static final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    /** The last navigation a WebView's intercept stopped; see takeIntercepted. */
+    private static volatile String intercepted;
+
+    /** Hands Rust the last intercepted navigation once, or null. */
+    public static String takeIntercepted() {
+        String url = intercepted;
+        intercepted = null;
+        return url;
+    }
 
     /** Map of view ID -> native View */
     private static final Map<Long, View> views = new HashMap<>();
@@ -211,7 +222,22 @@ public class GpuiPlatformView {
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
 
-        wv.setWebViewClient(new WebViewClient());
+        String intercept = params.getOrDefault("intercept", "");
+        if (intercept.isEmpty()) {
+            wv.setWebViewClient(new WebViewClient());
+        } else {
+            // Stop navigations to the prefix and keep the URL for Rust's takeIntercepted:
+            // a sign-in page's redirect back to the app.
+            wv.setWebViewClient(new WebViewClient() {
+                @Override
+                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                    String target = request.getUrl().toString();
+                    if (!target.startsWith(intercept)) return false;
+                    intercepted = target;
+                    return true;
+                }
+            });
+        }
         wv.setWebChromeClient(new WebChromeClient());
 
         if (!html.isEmpty()) {

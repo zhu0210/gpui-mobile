@@ -156,6 +156,17 @@ impl IosPlatformView {
             return Err("Failed to create WKWebView".into());
         }
 
+        if let Some(prefix) = params.creation_params.get("intercept") {
+            *INTERCEPT.lock().unwrap() = (prefix.clone(), None);
+            // WKWebView holds its navigation delegate weakly; the one instance lives on.
+            static DELEGATE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+            let delegate = *DELEGATE.get_or_init(|| {
+                let delegate: *mut AnyObject = msg_send![navigation_delegate_class(), new];
+                delegate as usize
+            }) as *mut AnyObject;
+            let _: () = msg_send![webview, setNavigationDelegate: delegate];
+        }
+
         // Load URL or HTML if provided
         if let Some(url) = params.creation_params.get("url") {
             if !url.is_empty() {
@@ -422,4 +433,78 @@ impl PlatformViewFactory for IosPlatformViewFactory {
     fn view_type(&self) -> &str {
         &self.view_type
     }
+}
+
+/// The prefix a WebView intercepts and the last navigation it stopped.
+#[cfg(target_os = "ios")]
+static INTERCEPT: std::sync::Mutex<(String, Option<String>)> =
+    std::sync::Mutex::new((String::new(), None));
+
+/// Hands over the last navigation stopped by a WebView's intercept, once.
+#[cfg(target_os = "ios")]
+pub(crate) fn take_intercepted() -> Option<String> {
+    INTERCEPT.lock().unwrap().1.take()
+}
+
+/// A `WKNavigationDelegate` that cancels navigations to [`INTERCEPT`]'s prefix and
+/// keeps their URL.
+#[cfg(target_os = "ios")]
+fn navigation_delegate_class() -> &'static objc2::runtime::AnyClass {
+    use objc2::runtime::{AnyClass, AnyProtocol, ClassBuilder, Sel};
+    use objc2::sel;
+
+    unsafe extern "C" fn decide(
+        _: *mut AnyObject,
+        _: Sel,
+        _webview: *mut AnyObject,
+        action: *mut AnyObject,
+        handler: *mut block2::Block<dyn Fn(isize)>,
+    ) {
+        let request: *mut AnyObject = msg_send![action, request];
+        let url: *mut AnyObject = msg_send![request, URL];
+        let target = if url.is_null() {
+            None
+        } else {
+            let text: *mut AnyObject = msg_send![url, absoluteString];
+            let utf8: *const std::ffi::c_char = msg_send![text, UTF8String];
+            (!utf8.is_null()).then(|| {
+                std::ffi::CStr::from_ptr(utf8)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        };
+        let mut intercept = INTERCEPT.lock().unwrap();
+        let stopped =
+            target.filter(|target| !intercept.0.is_empty() && target.starts_with(&intercept.0));
+        // WKNavigationActionPolicyCancel is 0, Allow is 1.
+        let policy = if stopped.is_some() { 0 } else { 1 };
+        if stopped.is_some() {
+            intercept.1 = stopped;
+        }
+        drop(intercept);
+        (*handler).call((policy,));
+    }
+
+    static CLASS: std::sync::OnceLock<&'static AnyClass> = std::sync::OnceLock::new();
+    CLASS.get_or_init(|| {
+        let mut builder =
+            ClassBuilder::new(c"GpuiWebViewInterceptDelegate", class!(NSObject)).unwrap();
+        if let Some(protocol) = AnyProtocol::get(c"WKNavigationDelegate") {
+            builder.add_protocol(protocol);
+        }
+        unsafe {
+            builder.add_method(
+                sel!(webView:decidePolicyForNavigationAction:decisionHandler:),
+                decide
+                    as unsafe extern "C" fn(
+                        *mut AnyObject,
+                        Sel,
+                        *mut AnyObject,
+                        *mut AnyObject,
+                        *mut block2::Block<dyn Fn(isize)>,
+                    ),
+            );
+        }
+        builder.register()
+    })
 }
