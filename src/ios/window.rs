@@ -370,6 +370,17 @@ fn register_text_input_view_class() -> &'static AnyClass {
             end_edit(this);
         }
 
+        // UITextView pastes into its own storage without going through insertText:, so the
+        // text stayed in the scratch document until the next edit flushed it. Insert it as
+        // typed text instead.
+        unsafe extern "C" fn paste(this: *mut AnyObject, _sel: Sel, _sender: *mut AnyObject) {
+            let pasteboard: *mut AnyObject = msg_send![class!(UIPasteboard), generalPasteboard];
+            let text: *mut AnyObject = msg_send![pasteboard, string];
+            if !text.is_null() {
+                let _: () = msg_send![this, insertText: text];
+            }
+        }
+
         unsafe extern "C" fn set_marked_text(
             this: *mut AnyObject,
             _sel: Sel,
@@ -520,6 +531,10 @@ fn register_text_input_view_class() -> &'static AnyClass {
             decl.add_method(
                 sel!(deleteBackward),
                 delete_backward as unsafe extern "C" fn(*mut AnyObject, Sel),
+            );
+            decl.add_method(
+                sel!(paste:),
+                paste as unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
             decl.add_method(
                 sel!(_selectionAtDocumentStart),
