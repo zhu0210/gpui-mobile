@@ -57,6 +57,11 @@ pub(super) struct State {
     /// Where each track's output ended, once it has, since the last seek.
     pub video_end_us: Option<i64>,
     pub audio_end_us: Option<i64>,
+    /// How fast the clock runs: 1 is normal speed.
+    pub rate: f64,
+    /// The gain applied to the sound, 0 while muted.
+    pub volume: f32,
+    pub muted: bool,
 }
 
 impl State {
@@ -78,7 +83,7 @@ impl State {
 
     pub fn position_at(&self, now_ns: i64) -> i64 {
         if self.running {
-            self.anchor_us + (now_ns - self.anchor_ns) / 1000
+            self.anchor_us + ((now_ns - self.anchor_ns) as f64 / 1000.0 * self.rate) as i64
         } else {
             self.anchor_us
         }
@@ -117,6 +122,8 @@ impl Shared {
         let mut state = State {
             playing: true,
             audio,
+            rate: 1.0,
+            volume: 1.0,
             ..State::default()
         };
         state.seek(0);
@@ -149,6 +156,36 @@ impl Shared {
 
     pub fn set_looping(&self, looping: bool) {
         self.update(|state| state.looping = looping);
+    }
+
+    /// Changes the speed from now on: the clock is re-anchored here first.
+    pub fn set_rate(&self, rate: f64) {
+        self.update(|state| {
+            let now = monotonic_ns();
+            state.anchor_us = state.position_at(now);
+            state.anchor_ns = now;
+            state.rate = rate;
+        });
+    }
+
+    pub fn rate(&self) -> f64 {
+        self.lock().rate
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        self.update(|state| state.volume = volume);
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.lock().volume
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.update(|state| state.muted = muted);
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.lock().muted
     }
 
     pub fn position_us(&self) -> i64 {
@@ -226,7 +263,7 @@ impl Shared {
                 return Some(position - pts);
             }
             let wait = if state.running {
-                Duration::from_micros((pts - position) as u64).min(POLL)
+                Duration::from_micros(((pts - position) as f64 / state.rate) as u64).min(POLL)
             } else {
                 POLL
             };
@@ -332,7 +369,6 @@ pub(super) enum AudioOutput {
     Pending,
     End,
     /// The output switched to this sample rate and channel count.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     Format((i32, i32)),
     /// Interleaved 16-bit samples, valid until `release`.
     Samples { pts: i64, data: *const i16, frames: usize },
@@ -341,6 +377,8 @@ pub(super) enum AudioOutput {
 pub(super) trait AudioSource {
     /// The sample rate and channel count before any `Format` output.
     fn format(&self) -> Result<(i32, i32)>;
+    /// Moves to `target_us`, switching first to the track chosen since (a
+    /// `Format` output follows when that changes the format).
     fn seek(&mut self, target_us: i64) -> Result<()>;
     fn next(&mut self) -> Result<AudioOutput>;
     /// Gives back the samples of the last `Samples` output.
@@ -375,9 +413,14 @@ pub(super) fn play_audio<S: AudioSink>(source: &mut dyn AudioSource, shared: &Sh
     let (mut generation, mut target) = (0, 0);
     // When the first samples since the last seek went to the stream.
     let mut first_write: Option<Instant> = None;
-    // Frames written before the first sample since the last seek, and its time.
-    let mut base: Option<(i64, i64)> = None;
+    // Frames written before the first sample since the last seek or speed
+    // change, its time, and the speed since.
+    let mut base: Option<(i64, i64, f64)> = None;
     let mut end_us = 0;
+    // Samples resampled for speed or scaled for volume, and where in the
+    // input the next output frame falls.
+    let mut scratch = Vec::new();
+    let mut phase = 0.0;
     loop {
         let state = shared.lock();
         if state.stop {
@@ -391,7 +434,7 @@ pub(super) fn play_audio<S: AudioSink>(source: &mut dyn AudioSource, shared: &Sh
             if let Some(stream) = &stream {
                 stream.pause_and_flush();
             }
-            (first_write, base) = (None, None);
+            (first_write, base, phase) = (None, None, 0.0);
             continue;
         }
         let (running, holding, finished) = (state.running, state.holding, state.audio_end_us.is_some());
@@ -433,8 +476,33 @@ pub(super) fn play_audio<S: AudioSink>(source: &mut dyn AudioSource, shared: &Sh
             pts += offset as i64 * 1_000_000 / rate;
         }
         if offset < frames {
-            let (base_frames, base_us) = *base.get_or_insert((stream.frames_written(), pts));
             end_us = pts + (frames - offset) as i64 * 1_000_000 / rate;
+            let state = shared.lock();
+            let (speed, gain) = (state.rate, if state.muted { 0.0 } else { state.volume });
+            drop(state);
+            // SAFETY: the source keeps `frames` frames at `data` until `release`.
+            let input = unsafe { std::slice::from_raw_parts(data.add(offset * channels), (frames - offset) * channels) };
+            let output = if speed == 1.0 && gain == 1.0 {
+                phase = 0.0;
+                input
+            } else {
+                scratch.clear();
+                if speed == 1.0 {
+                    scratch.extend_from_slice(input);
+                } else {
+                    stretch(input, channels, speed, &mut phase, &mut scratch);
+                }
+                if gain != 1.0 {
+                    scratch.iter_mut().for_each(|sample| *sample = (*sample as f32 * gain) as i16);
+                }
+                &scratch[..]
+            };
+            let (base_frames, base_us, base_speed) = match base {
+                Some(base) if base.2 == speed => base,
+                _ => *base.insert((stream.frames_written(), pts, speed)),
+            };
+            let (data, frames) = (output.as_ptr(), output.len() / channels);
+            let mut offset = 0;
             while offset < frames {
                 let state = shared.lock();
                 if state.stop || state.seek_generation != generation {
@@ -444,7 +512,7 @@ pub(super) fn play_audio<S: AudioSink>(source: &mut dyn AudioSource, shared: &Sh
                 drop(state);
                 stream.follow(sound);
                 // Blocks while the stream's buffer is full, which paces this thread.
-                // SAFETY: the source keeps `frames` frames at `data` until `release`.
+                // SAFETY: `output` holds `frames` frames.
                 let written = unsafe { stream.write(data.add(offset * channels), frames - offset)? };
                 offset += written;
                 if written > 0 {
@@ -460,13 +528,33 @@ pub(super) fn play_audio<S: AudioSink>(source: &mut dyn AudioSource, shared: &Sh
                 }
                 if let Some((frame, time_ns)) = stream.timestamp() {
                     if frame >= base_frames {
-                        shared.sync(generation, base_us + (frame - base_frames) * 1_000_000 / rate, time_ns);
+                        let played_us = ((frame - base_frames) as f64 * 1e6 / rate as f64 * base_speed) as i64;
+                        shared.sync(generation, base_us + played_us, time_ns);
                     }
                 }
             }
         }
         source.release()?;
     }
+}
+
+/// Resamples interleaved `input` to play `speed` times as fast, starting
+/// `phase` frames in and carrying the remainder over to the next call.
+// ponytail: plain resampling, so the pitch follows the speed; a WSOLA
+// time-stretch keeps it if users mind.
+fn stretch(input: &[i16], channels: usize, speed: f64, phase: &mut f64, output: &mut Vec<i16>) {
+    let frames = input.len() / channels;
+    let mut position = *phase;
+    while (position as usize) < frames {
+        let (index, fraction) = (position as usize, position.fract());
+        let next = (index + 1).min(frames - 1);
+        for channel in 0..channels {
+            let (a, b) = (input[index * channels + channel] as f64, input[next * channels + channel] as f64);
+            output.push((a + (b - a) * fraction) as i16);
+        }
+        position += speed;
+    }
+    *phase = position - frames as f64;
 }
 
 /// How far imported frames were from the clock, between log reports.
@@ -500,5 +588,36 @@ impl Shared {
             current = Drift::default();
         }
         drift.set(current);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stretch_keeps_the_count_across_calls() {
+        let input: Vec<i16> = (0..200).flat_map(|i| [i, -i]).collect();
+        let (mut phase, mut output) = (0.0, Vec::new());
+        for chunk in input.chunks(2 * 30) {
+            stretch(chunk, 2, 1.5, &mut phase, &mut output);
+        }
+        assert!((output.len() / 2).abs_diff(134) <= 1, "{} frames", output.len() / 2);
+        assert_eq!(&output[..6], &[0, 0, 1, -1, 3, -3]);
+        let (mut phase, mut slow) = (0.0, Vec::new());
+        stretch(&input, 2, 0.5, &mut phase, &mut slow);
+        assert_eq!(slow.len(), 800);
+        assert_eq!(&slow[..6], &[0, 0, 0, 0, 1, -1]);
+    }
+
+    #[test]
+    fn the_clock_runs_at_the_rate() {
+        let shared = Shared::new(false);
+        shared.update(|state| state.holding = false);
+        shared.set_rate(2.0);
+        let start = shared.position_us();
+        std::thread::sleep(Duration::from_millis(100));
+        let moved = shared.position_us() - start;
+        assert!((190_000..260_000).contains(&moved), "moved {moved} µs");
     }
 }

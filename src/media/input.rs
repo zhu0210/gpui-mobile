@@ -233,7 +233,7 @@ fn decrypt(mut data: Vec<u8>, key: &[u8; 16], iv: &[u8; 16]) -> Result<Vec<u8>> 
 #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
 mod tests {
     use super::*;
-    use crate::media::ffmpeg::{probe, FfmpegAudio, FfmpegVideo};
+    use crate::media::ffmpeg::{probe, Choices, FfmpegAudio, FfmpegVideo};
     use crate::media::player::{AudioOutput, AudioSource, VideoOutput, VideoSource};
     use std::path::Path;
 
@@ -280,9 +280,10 @@ mod tests {
     fn plays_and_seeks(origin: Origin, duration_s: f64) {
         let info = probe(&origin).unwrap();
         assert!((info.duration_us as f64 / 1e6 - duration_s).abs() < 0.2, "duration {}", info.duration_us);
-        assert!(info.has_audio);
+        assert!(info.audio_track.is_some());
         let slot = Arc::new(Mutex::new(None));
-        let (mut video, hardware) = FfmpegVideo::open(&origin, None, slot.clone()).unwrap();
+        let choices = Choices::new(&info);
+        let (mut video, hardware) = FfmpegVideo::open(&origin, None, slot.clone(), choices.clone()).unwrap();
         assert!(!hardware);
         assert!(next_frame(&mut video, &slot) < 100_000);
         video.seek(4_000_000).unwrap();
@@ -299,7 +300,8 @@ mod tests {
         }
         assert!((4_000_000..4_100_000).contains(&last), "decoded on to {last} µs");
 
-        let mut audio = FfmpegAudio::open(&origin).unwrap();
+        assert!(choices.lock().unwrap().demuxed_us >= 4_000_000, "demuxed to 4 s");
+        let mut audio = FfmpegAudio::open(&origin, choices).unwrap();
         audio.seek(4_000_000).unwrap();
         let pts = loop {
             match audio.next().unwrap() {
@@ -319,6 +321,98 @@ mod tests {
     #[test]
     fn encrypted_hls_plays_and_seeks_through_callbacks() {
         plays_and_seeks(hls(), 6.0);
+    }
+
+    #[test]
+    fn tracks_come_with_their_language_and_title() {
+        let info = probe(&Origin::File(assets().join("tracks.mp4"))).unwrap();
+        let audio: Vec<_> = info
+            .audio_tracks
+            .iter()
+            .map(|track| (track.id, track.language.as_deref(), track.title.as_deref(), track.codec.as_str()))
+            .collect();
+        assert_eq!(audio, [(1, Some("eng"), Some("Main"), "aac"), (2, Some("jpn"), Some("Commentary"), "aac")]);
+        assert_eq!(info.audio_track, Some(1));
+        let subtitles: Vec<_> = info
+            .subtitle_tracks
+            .iter()
+            .map(|track| (track.id, track.language.as_deref(), track.title.as_deref()))
+            .collect();
+        assert_eq!(subtitles, [(3, Some("eng"), Some("English")), (4, Some("fre"), Some("Français"))]);
+    }
+
+    /// Decodes `file` with subtitle track `id` up to 4.5 s and returns the
+    /// text showing at each of `times` (seconds).
+    fn subtitles_at(file: &str, id: usize, times: &[f64]) -> Vec<Option<String>> {
+        let origin = Origin::File(assets().join(file));
+        let info = probe(&origin).unwrap();
+        let choices = Choices::new(&info);
+        choices.lock().unwrap().subtitle = Some(id);
+        let slot = Arc::new(Mutex::new(None));
+        let (mut video, _) = FfmpegVideo::open(&origin, None, slot.clone(), choices.clone()).unwrap();
+        // The playback loop seeks first, which picks up the choice.
+        video.seek(0).unwrap();
+        while next_frame(&mut video, &slot) < 4_500_000 {}
+        let mut choices = choices.lock().unwrap();
+        times.iter().map(|&time| choices.text_at((time * 1e6) as i64)).collect()
+    }
+
+    #[test]
+    fn mp4_text_subtitles_give_their_cues() {
+        let text = subtitles_at("tracks.mp4", 3, &[0.2, 1.0, 2.2, 3.0]);
+        let line = |text: &str| Some(text.to_owned());
+        assert_eq!(text, [None, line("Hello from track one"), None, line("Second line\nover two rows")]);
+        assert_eq!(subtitles_at("tracks.mp4", 4, &[2.0]), [line("Bonjour, piste deux")]);
+    }
+
+    #[test]
+    fn subrip_and_ass_subtitles_give_plain_text() {
+        let line = |text: &str| Some(text.to_owned());
+        assert_eq!(subtitles_at("subtitles.mkv", 1, &[1.0]), [line("Hello from track one")]);
+        assert_eq!(subtitles_at("subtitles.mkv", 2, &[2.0, 3.5]), [line("Styled, with commas\nNext row"), None]);
+    }
+
+    #[test]
+    fn a_seek_switches_to_the_chosen_audio_track() {
+        let origin = reader(assets().join("tracks.mp4"));
+        let info = probe(&origin).unwrap();
+        let choices = Choices::new(&info);
+        let mut audio = FfmpegAudio::open(&origin, choices.clone()).unwrap();
+        assert_eq!(audio.format().unwrap(), (48_000, 1));
+        choices.lock().unwrap().audio = Some(2);
+        audio.seek(1_000_000).unwrap();
+        assert!(matches!(audio.next().unwrap(), AudioOutput::Format((44_100, 1))));
+        let pts = loop {
+            match audio.next().unwrap() {
+                AudioOutput::Samples { pts, frames, .. } if frames > 0 => break pts,
+                AudioOutput::End => panic!("no audio"),
+                _ => {}
+            }
+        };
+        // The packet holding 1 s may start a little after it.
+        assert!((900_000..=1_050_000).contains(&pts), "audio seeked to {pts} µs");
+    }
+
+    #[test]
+    fn a_maximum_height_scales_software_frames() {
+        let origin = Origin::File(assets().join("tracks.mp4"));
+        let info = probe(&origin).unwrap();
+        let choices = Choices::new(&info);
+        choices.lock().unwrap().max_height = Some(90);
+        let slot = Arc::new(Mutex::new(None));
+        let (mut video, _) = FfmpegVideo::open(&origin, None, slot.clone(), choices).unwrap();
+        loop {
+            match video.next().unwrap() {
+                VideoOutput::Frame(_, frame) => {
+                    video.release(frame, true).unwrap();
+                    let picture = slot.lock().unwrap().take().unwrap();
+                    assert_eq!((picture.frame.width(), picture.frame.height()), (160, 90));
+                    break;
+                }
+                VideoOutput::Pending => {}
+                VideoOutput::End => panic!("no frame"),
+            }
+        }
     }
 
     #[test]

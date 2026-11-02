@@ -192,6 +192,97 @@ impl VideoFrames {
         self.inner.ended()
     }
 
+    /// Plays `rate` times as fast, clamped to 0.25–4. The sound keeps up; on
+    /// the threaded players (Android, FFmpeg) its pitch follows the speed.
+    pub fn set_rate(&self, rate: f32) {
+        self.inner.set_rate(if rate.is_finite() { rate.clamp(0.25, 4.0) } else { 1.0 })
+    }
+
+    pub fn rate(&self) -> f32 {
+        self.inner.rate()
+    }
+
+    /// The sound's gain, clamped to 0–1.
+    pub fn set_volume(&self, volume: f32) {
+        self.inner.set_volume(if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 1.0 })
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.inner.volume()
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.inner.set_muted(muted)
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.inner.is_muted()
+    }
+
+    /// How far playback can go without waiting for data: the whole of a
+    /// local file; for a reader or HLS, as far as FFmpeg has read, which is
+    /// a little ahead of the position.
+    pub fn buffered(&self) -> Duration {
+        self.inner.buffered()
+    }
+
+    /// The audio tracks to choose from (FFmpeg backends; none on the
+    /// platform's player).
+    pub fn audio_tracks(&self) -> Vec<Track> {
+        self.with_controls(|controls| controls.audio_tracks().to_vec()).unwrap_or_default()
+    }
+
+    /// The audio track playing, by [`Track::id`].
+    pub fn audio_track(&self) -> Option<usize> {
+        self.with_controls(|controls| controls.audio_track()).flatten()
+    }
+
+    /// Plays the audio track `id` from where playback is. Unknown ids are
+    /// ignored.
+    pub fn set_audio_track(&self, id: usize) {
+        self.with_controls(|controls| controls.set_audio_track(id));
+    }
+
+    /// The text subtitle tracks to choose from (FFmpeg backends): embedded
+    /// SubRip, ASS and MP4 text. Picture subtitles aren't listed.
+    pub fn subtitle_tracks(&self) -> Vec<Track> {
+        self.with_controls(|controls| controls.subtitle_tracks().to_vec()).unwrap_or_default()
+    }
+
+    /// The subtitle track shown, by [`Track::id`]; none by default.
+    pub fn subtitle_track(&self) -> Option<usize> {
+        self.with_controls(|controls| controls.subtitle_track()).flatten()
+    }
+
+    /// Shows the subtitle track `id`, or none.
+    pub fn set_subtitle_track(&self, id: Option<usize>) {
+        self.with_controls(|controls| controls.set_subtitle_track(id));
+    }
+
+    /// The chosen subtitle track's text showing now, styling removed, one
+    /// line per row; the app draws it.
+    pub fn subtitle_text(&self) -> Option<String> {
+        self.with_controls(|controls| controls.subtitle_text()).flatten()
+    }
+
+    /// Scales software-decoded frames taller than `height` down to it,
+    /// keeping the aspect ratio, before they are uploaded (FFmpeg backends).
+    /// Hardware-decoded frames reach the GPU without CPU copies and keep
+    /// their size.
+    pub fn set_max_height(&self, height: Option<u32>) {
+        self.with_controls(|controls| controls.set_max_height(height));
+    }
+
+    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+    fn with_controls<R>(&self, f: impl FnOnce(&ffmpeg::Controls) -> R) -> Option<R> {
+        self.inner.controls().map(f)
+    }
+
+    #[cfg(not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux"))))]
+    fn with_controls<R>(&self, _f: impl FnOnce(&NoControls) -> R) -> Option<R> {
+        None
+    }
+
     /// Draws the newest decoded frame, as large as fits in `bounds` with its
     /// aspect ratio and centred, with `corner_radii` rounding the picture.
     /// Call it from a `canvas` paint callback; it asks for further frames
@@ -214,6 +305,51 @@ impl Drop for VideoFrames {
     fn drop(&mut self) {
         #[cfg(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", target_os = "linux")))]
         gpui_wgpu::remove_external_texture(self.image.id);
+    }
+}
+
+/// An audio or subtitle track of the playing file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Track {
+    /// What [`VideoFrames::set_audio_track`] and
+    /// [`VideoFrames::set_subtitle_track`] take: the stream's index.
+    pub id: usize,
+    /// The stream's ISO 639-2 language (`eng`), when it names one.
+    pub language: Option<String>,
+    pub title: Option<String>,
+    /// FFmpeg's codec name: `aac`, `subrip`, `mov_text`, …
+    pub codec: String,
+}
+
+/// What `with_controls` would hand out where there is no FFmpeg: nothing.
+#[cfg(not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux"))))]
+enum NoControls {}
+
+#[cfg(not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux"))))]
+impl NoControls {
+    fn audio_tracks(&self) -> &[Track] {
+        match *self {}
+    }
+    fn audio_track(&self) -> Option<usize> {
+        match *self {}
+    }
+    fn set_audio_track(&self, _id: usize) {
+        match *self {}
+    }
+    fn subtitle_tracks(&self) -> &[Track] {
+        match *self {}
+    }
+    fn subtitle_track(&self) -> Option<usize> {
+        match *self {}
+    }
+    fn set_subtitle_track(&self, _id: Option<usize>) {
+        match *self {}
+    }
+    fn subtitle_text(&self) -> Option<String> {
+        match *self {}
+    }
+    fn set_max_height(&self, _height: Option<u32>) {
+        match *self {}
     }
 }
 
@@ -363,6 +499,27 @@ impl Decoder {
         match *self {}
     }
     fn is_active(&self) -> bool {
+        match *self {}
+    }
+    fn set_rate(&self, _rate: f32) {
+        match *self {}
+    }
+    fn rate(&self) -> f32 {
+        match *self {}
+    }
+    fn set_volume(&self, _volume: f32) {
+        match *self {}
+    }
+    fn volume(&self) -> f32 {
+        match *self {}
+    }
+    fn set_muted(&self, _muted: bool) {
+        match *self {}
+    }
+    fn is_muted(&self) -> bool {
+        match *self {}
+    }
+    fn buffered(&self) -> Duration {
         match *self {}
     }
     fn update(&self, _image_id: gpui::ImageId) -> anyhow::Result<()> {

@@ -59,6 +59,10 @@ pub(super) struct Decoder {
     software: Option<Arc<Mutex<Option<super::planes::Picture>>>>,
     #[cfg(feature = "ffmpeg")]
     uploader: RefCell<super::planes::Uploader>,
+    #[cfg(feature = "ffmpeg")]
+    controls: Option<super::ffmpeg::Controls>,
+    /// Whether the platform player plays a local file.
+    local: bool,
 }
 
 impl Decoder {
@@ -111,27 +115,30 @@ impl Decoder {
             track: video,
             input_done: false,
         };
-        Self::start(
+        let mut decoder = Self::start(
             reader,
             (width, height, rotation, duration_us),
             video,
             audio.map(|audio| Box::new(audio) as Box<dyn AudioSource + Send>),
-        )
+        )?;
+        decoder.local = matches!(source, Source::File(_));
+        Ok(decoder)
     }
 
     /// FFmpeg demuxing, decoding through MediaCodec into the reader, or in
     /// software when MediaCodec can't (or `software` asks for it).
     #[cfg(feature = "ffmpeg")]
     fn open_ffmpeg(source: Source, software: bool) -> Result<Self> {
-        use super::ffmpeg::{probe, FfmpegAudio, FfmpegVideo};
+        use super::ffmpeg::{probe, Choices, Controls, FfmpegAudio, FfmpegVideo};
         let origin = super::input::Origin::of(source)?;
         let info = probe(&origin)?;
         let reader = Reader::new(info.width, info.height)?;
         let slot = Arc::new(Mutex::new(None));
         let window = if software { None } else { Some(reader.window()?) };
-        let (video, _hardware) = FfmpegVideo::open(&origin, window, slot.clone())?;
-        let audio = if info.has_audio {
-            FfmpegAudio::open(&origin)
+        let choices = Choices::new(&info);
+        let (video, _hardware) = FfmpegVideo::open(&origin, window, slot.clone(), choices.clone())?;
+        let audio = if info.audio_track.is_some() {
+            FfmpegAudio::open(&origin, choices.clone())
                 .map_err(|error| log::warn!("video: audio stream skipped: {error:#}"))
                 .ok()
         } else {
@@ -151,6 +158,7 @@ impl Decoder {
             audio.map(|audio| Box::new(audio) as Box<dyn AudioSource + Send>),
         )?;
         decoder.software = Some(slot);
+        decoder.controls = Some(Controls::new(&origin, &info, choices, decoder.shared.clone()));
         Ok(decoder)
     }
 
@@ -210,6 +218,9 @@ impl Decoder {
             software: None,
             #[cfg(feature = "ffmpeg")]
             uploader: RefCell::new(Default::default()),
+            #[cfg(feature = "ffmpeg")]
+            controls: None,
+            local: false,
         })
     }
 
@@ -256,6 +267,45 @@ impl Decoder {
 
     pub fn is_active(&self) -> bool {
         self.shared.is_active(self.last_import.get())
+    }
+
+    pub fn set_rate(&self, rate: f32) {
+        self.shared.set_rate(rate as f64)
+    }
+
+    pub fn rate(&self) -> f32 {
+        self.shared.rate() as f32
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        self.shared.set_volume(volume)
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.shared.volume()
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.shared.set_muted(muted)
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.shared.is_muted()
+    }
+
+    /// All of a local file; for a URL, `AMediaExtractor` keeps its cache to
+    /// itself, so only up to where playback is.
+    pub fn buffered(&self) -> Duration {
+        #[cfg(feature = "ffmpeg")]
+        if let Some(controls) = &self.controls {
+            return Duration::from_micros(controls.buffered_us() as u64);
+        }
+        if self.local { self.duration() } else { self.position() }
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    pub fn controls(&self) -> Option<&super::ffmpeg::Controls> {
+        self.controls.as_ref()
     }
 
     /// Imports the newest decoded image, if there is one, and makes it the

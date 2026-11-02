@@ -64,7 +64,7 @@ cd "$SRC"
     --enable-parser=h264,hevc,vp9,av1,aac,mpegaudio,opus \
     --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,vp9_superframe_split,extract_extradata \
     --enable-decoder=h264,hevc,vp9,av1,aac,mp3,opus \
-    --enable-decoder=subrip,ass,ssa,webvtt,mov_text \
+    --enable-decoder=subrip,ass,ssa,webvtt,movtext \
     --enable-hwaccel=h264_videotoolbox,hevc_videotoolbox,vp9_videotoolbox,av1_videotoolbox \
     --enable-swresample --enable-swscale
 
