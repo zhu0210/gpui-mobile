@@ -230,15 +230,18 @@ fn decrypt(mut data: Vec<u8>, key: &[u8; 16], iv: &[u8; 16]) -> Result<Vec<u8>> 
     Ok(data)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
 mod tests {
     use super::*;
     use crate::media::ffmpeg::{probe, FfmpegAudio, FfmpegVideo};
     use crate::media::player::{AudioOutput, AudioSource, VideoOutput, VideoSource};
     use std::path::Path;
 
+    /// The example's clips; `GPUI_MEDIA_ASSETS` points elsewhere (on a phone).
     fn assets() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("example/assets/video")
+        std::env::var_os("GPUI_MEDIA_ASSETS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("example/assets/video"))
     }
 
     fn reader(path: PathBuf) -> Origin {
