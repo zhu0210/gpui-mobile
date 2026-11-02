@@ -9,18 +9,23 @@
 //!   segments) is fetched whole through the Rust callback and served from
 //!   memory. AES-128 segments (`crypto:<uri>`, with the key and IV as
 //!   options) are decrypted here with libavutil's AES.
+//! - The probe and the playback threads each demux on their own, so their
+//!   fetches go through one [`Shelf`]: each URI is fetched once, and the
+//!   segments after the one asked for are fetched ahead.
+//! - A master playlist is narrowed to one variant before FFmpeg sees it
+//!   ([`hls`]): its `hls` demuxer reads every variant's segments otherwise.
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use ffmpeg::ffi;
 use ffmpeg::format::context::{Input, StreamIo};
 use ffmpeg_next as ffmpeg;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::fmt;
 use std::io::{self, Cursor};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 /// Opens a fresh reader over the same bytes; each playback thread opens its own.
 pub(super) type OpenReader = Arc<dyn Fn() -> io::Result<Box<dyn super::ReadSeek>> + Send + Sync>;
@@ -41,6 +46,183 @@ impl fmt::Debug for Origin {
             Self::Reader(_) => f.write_str("a Rust reader"),
             Self::Hls { playlist, .. } => write!(f, "HLS {playlist:?}"),
         }
+    }
+}
+
+/// Segments fetched ahead of the one a demuxer asks for: a stall between
+/// segments otherwise starves the audio and stutters the picture.
+const AHEAD: usize = 3;
+/// Segments kept in memory: the ones ahead, and a few behind for the
+/// playback thread that trails the other.
+const KEPT: usize = AHEAD + 4;
+/// Replies smaller than this (keys) are kept for good, like playlists.
+const SMALL: usize = 4096;
+/// The tallest variant picked from a master playlist: a phone's screen.
+const MAX_HEIGHT: u32 = 1080;
+
+/// HLS for `playlist`: its fetches shared ([`Shelf`]), and a master
+/// playlist narrowed to one variant.
+pub(super) fn hls(playlist: &str, fetch: Fetch) -> Origin {
+    let shelf = Shelf::new(fetch);
+    let playlist = match shelf.get(playlist) {
+        Ok(text) => variant(&String::from_utf8_lossy(&text), playlist).unwrap_or_else(|| playlist.to_owned()),
+        // FFmpeg's open says what went wrong.
+        Err(_) => playlist.to_owned(),
+    };
+    let fetch: Fetch = Arc::new(move |uri: &str| shelf.get(uri));
+    Origin::Hls { playlist, fetch }
+}
+
+/// The variant of master playlist `text` (at `base`) to play: the richest
+/// up to [`MAX_HEIGHT`] tall, else the smallest. `None` for a media playlist,
+/// or one whose audio comes as a rendition of its own, which needs the
+/// master.
+fn variant(text: &str, base: &str) -> Option<String> {
+    if text.lines().any(|line| line.starts_with("#EXT-X-MEDIA:") && line.contains("TYPE=AUDIO") && line.contains("URI=")) {
+        return None;
+    }
+    let attr = |line: &str, key: &str| {
+        line.split(',').find_map(|pair| pair.trim().strip_prefix(key)?.strip_prefix('=').map(str::to_owned))
+    };
+    // (bandwidth, height, uri)
+    let mut variants = Vec::new();
+    let mut lines = text.lines().map(str::trim);
+    while let Some(line) = lines.next() {
+        let Some(attrs) = line.strip_prefix("#EXT-X-STREAM-INF:") else { continue };
+        let bandwidth: u64 = attr(attrs, "BANDWIDTH").and_then(|b| b.parse().ok()).unwrap_or(0);
+        let height: Option<u32> = attr(attrs, "RESOLUTION").and_then(|r| r.split_once('x')?.1.parse().ok());
+        if let Some(uri) = lines.by_ref().find(|l| !l.is_empty() && !l.starts_with('#')) {
+            variants.push((bandwidth, height, resolve(base, uri)));
+        }
+    }
+    let fits = variants.iter().filter(|v| v.1.is_none_or(|h| h <= MAX_HEIGHT)).max_by_key(|v| v.0);
+    let picked = fits.or_else(|| variants.iter().min_by_key(|v| v.1))?;
+    Some(picked.2.clone())
+}
+
+/// `uri` as FFmpeg resolves it against playlist `base`.
+fn resolve(base: &str, uri: &str) -> String {
+    if uri.starts_with('/') || uri.contains("://") {
+        return uri.to_owned();
+    }
+    match base.rfind('/') {
+        Some(slash) => format!("{}{uri}", &base[..=slash]),
+        None => uri.to_owned(),
+    }
+}
+
+/// The segment URIs of media playlist `text` (at `base`), in order.
+fn segments(text: &str, base: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|uri| resolve(base, uri))
+        .collect()
+}
+
+/// One HLS stream's fetches, shared by its probe and playback threads.
+pub(super) struct Shelf {
+    fetch: Fetch,
+    state: Mutex<Shelved>,
+    fetched: Condvar,
+}
+
+#[derive(Default)]
+struct Shelved {
+    /// Playlists and keys.
+    small: HashMap<String, Vec<u8>>,
+    /// The segments fetched last, oldest first.
+    segments: VecDeque<(String, Vec<u8>)>,
+    /// URIs being fetched now.
+    fetching: HashSet<String>,
+    /// The media playlist's segments, in order.
+    order: Vec<String>,
+}
+
+impl Shelved {
+    fn kept(&self, uri: &str) -> Option<&Vec<u8>> {
+        self.small.get(uri).or_else(|| self.segments.iter().find(|(u, _)| u == uri).map(|(_, b)| b))
+    }
+
+    fn keep(&mut self, uri: &str, bytes: &[u8]) {
+        if bytes.starts_with(b"#EXTM3U") {
+            let text = String::from_utf8_lossy(bytes);
+            // A master playlist lists playlists, not segments.
+            if !text.contains("#EXT-X-STREAM-INF") {
+                self.order = segments(&text, uri);
+            }
+            self.small.insert(uri.to_owned(), bytes.to_vec());
+        } else if bytes.len() < SMALL {
+            self.small.insert(uri.to_owned(), bytes.to_vec());
+        } else {
+            if self.segments.len() == KEPT {
+                self.segments.pop_front();
+            }
+            self.segments.push_back((uri.to_owned(), bytes.to_vec()));
+        }
+    }
+}
+
+impl Shelf {
+    fn new(fetch: Fetch) -> Arc<Self> {
+        Arc::new(Self { fetch, state: Mutex::default(), fetched: Condvar::new() })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Shelved> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `uri`'s bytes: kept, fetched by another thread meanwhile, or fetched
+    /// now; then the segments after it are fetched ahead.
+    fn get(self: &Arc<Self>, uri: &str) -> io::Result<Vec<u8>> {
+        let mut state = self.lock();
+        let bytes = loop {
+            if let Some(bytes) = state.kept(uri) {
+                break bytes.clone();
+            }
+            if state.fetching.contains(uri) {
+                state = self.fetched.wait(state).unwrap_or_else(PoisonError::into_inner);
+                continue;
+            }
+            state.fetching.insert(uri.to_owned());
+            drop(state);
+            let fetched = (self.fetch)(uri);
+            state = self.lock();
+            state.fetching.remove(uri);
+            if let Ok(bytes) = &fetched {
+                state.keep(uri, bytes);
+            }
+            self.fetched.notify_all();
+            break fetched?;
+        };
+        // The next few, not kept or coming already.
+        let ahead: Vec<String> = match state.order.iter().position(|u| u == uri) {
+            Some(at) => state.order[at + 1..]
+                .iter()
+                .take(AHEAD)
+                .filter(|u| state.kept(u).is_none() && !state.fetching.contains(*u))
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        state.fetching.extend(ahead.iter().cloned());
+        drop(state);
+        if !ahead.is_empty() {
+            let shelf = self.clone();
+            std::thread::spawn(move || {
+                for uri in ahead {
+                    let fetched = (shelf.fetch)(&uri);
+                    let mut state = shelf.lock();
+                    state.fetching.remove(&uri);
+                    match fetched {
+                        Ok(bytes) => state.keep(&uri, &bytes),
+                        Err(error) => log::warn!("video: HLS fetching {uri:?} ahead: {error}"),
+                    }
+                    shelf.fetched.notify_all();
+                }
+            });
+        }
+        Ok(bytes)
     }
 }
 
@@ -321,6 +503,48 @@ mod tests {
     #[test]
     fn encrypted_hls_plays_and_seeks_through_callbacks() {
         plays_and_seeks(hls(), 6.0);
+    }
+
+    #[test]
+    fn hls_fetches_each_uri_once_and_segments_ahead() {
+        let dir = assets().join("hls");
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = asked.clone();
+        let origin = super::hls(
+            "hls/clip.m3u8",
+            Arc::new(move |uri: &str| {
+                log.lock().unwrap().push(uri.to_owned());
+                std::fs::read(dir.join(uri.strip_prefix("hls/").ok_or(io::ErrorKind::NotFound)?))
+            }),
+        );
+        let info = probe(&origin).unwrap();
+        let choices = Choices::new(&info);
+        let mut audio = FfmpegAudio::open(&origin, choices.clone()).unwrap();
+        while !matches!(audio.next().unwrap(), AudioOutput::End) {
+            audio.release().unwrap();
+        }
+        let asked = asked.lock().unwrap().clone();
+        let mut once = asked.clone();
+        once.sort();
+        once.dedup();
+        assert_eq!(asked.len(), once.len(), "fetched twice: {asked:?}");
+        assert!(asked.contains(&"hls/clip2.ts".to_owned()));
+    }
+
+    #[test]
+    fn a_master_playlist_plays_one_variant() {
+        let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nlow/index.m3u8\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080\nhd/index.m3u8\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=3840x2160\n/x/4k/index.m3u8\n";
+        assert_eq!(variant(master, "v/master.m3u8").as_deref(), Some("v/hd/index.m3u8"));
+        let tall = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=3840x2160\n/x/4k.m3u8\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=7000000,RESOLUTION=2560x1440\n/x/2k.m3u8\n";
+        assert_eq!(variant(tall, "/x/m.m3u8").as_deref(), Some("/x/2k.m3u8"));
+        // Audio of its own needs the master; a media playlist is played as it is.
+        let rendition = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",URI=\"a.m3u8\"\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"a\"\nv.m3u8\n";
+        assert_eq!(variant(rendition, "m.m3u8"), None);
+        assert_eq!(variant("#EXTM3U\n#EXTINF:2,\nclip0.ts\n", "clip.m3u8"), None);
     }
 
     #[test]

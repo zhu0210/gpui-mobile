@@ -18,6 +18,10 @@ pub(super) const POLL: Duration = Duration::from_millis(20);
 const DRIFT_REPORT_FRAMES: u32 = 300;
 /// How long a seek waits for the audio stream's first timestamp.
 const HOLD_TIMEOUT: Duration = Duration::from_millis(500);
+/// How far the clock runs on past the sound last heard: when the sound stops
+/// coming (its input stalled), the picture waits for it instead of running
+/// ahead and jumping back.
+const HEARD_SLACK_NS: i64 = 200_000_000;
 
 pub(super) fn monotonic_ns() -> i64 {
     let mut time = libc::timespec {
@@ -52,6 +56,9 @@ pub(super) struct State {
     pub anchor_us: i64,
     pub anchor_ns: i64,
     pub running: bool,
+    /// Whether the anchor is the sound's timestamp, which the clock doesn't
+    /// run far past.
+    pub heard: bool,
     /// When the clock last started; audio timestamps from before are stale.
     pub started_ns: i64,
     /// Where each track's output ended, once it has, since the last seek.
@@ -83,7 +90,11 @@ impl State {
 
     pub fn position_at(&self, now_ns: i64) -> i64 {
         if self.running {
-            self.anchor_us + ((now_ns - self.anchor_ns) as f64 / 1000.0 * self.rate) as i64
+            let mut elapsed = now_ns - self.anchor_ns;
+            if self.heard {
+                elapsed = elapsed.min(HEARD_SLACK_NS);
+            }
+            self.anchor_us + (elapsed as f64 / 1000.0 * self.rate) as i64
         } else {
             self.anchor_us
         }
@@ -94,14 +105,20 @@ impl State {
     pub fn settle(&mut self) {
         let run = self.should_run();
         if run != self.running {
-            let now = monotonic_ns();
-            self.anchor_us = self.position_at(now);
-            self.anchor_ns = now;
+            self.reanchor();
             self.running = run;
             if run {
-                self.started_ns = now;
+                self.started_ns = self.anchor_ns;
             }
         }
+    }
+
+    /// Anchors the clock where it stands now.
+    pub fn reanchor(&mut self) {
+        let now = monotonic_ns();
+        self.anchor_us = self.position_at(now);
+        self.anchor_ns = now;
+        self.heard = false;
     }
 
     pub fn seek(&mut self, target_us: i64) {
@@ -109,6 +126,7 @@ impl State {
         self.seek_target_us = target_us;
         self.anchor_us = target_us;
         self.anchor_ns = monotonic_ns();
+        self.heard = false;
         self.running = false;
         self.holding = true;
         self.ended = false;
@@ -161,9 +179,7 @@ impl Shared {
     /// Changes the speed from now on: the clock is re-anchored here first.
     pub fn set_rate(&self, rate: f64) {
         self.update(|state| {
-            let now = monotonic_ns();
-            state.anchor_us = state.position_at(now);
-            state.anchor_ns = now;
+            state.reanchor();
             state.rate = rate;
         });
     }
@@ -246,6 +262,7 @@ impl Shared {
         }
         state.anchor_us = media_us;
         state.anchor_ns = time_ns;
+        state.heard = true;
         drop(state);
         self.changed.notify_all();
     }
@@ -458,6 +475,8 @@ pub(super) fn play_audio<S: AudioSink>(source: &mut dyn AudioSource, shared: &Sh
                     if state.seek_generation == generation {
                         state.audio_end_us = Some(end_us.max(target));
                         state.holding = false;
+                        // A longer picture plays on without sound.
+                        state.reanchor();
                     }
                 });
                 continue;
@@ -608,6 +627,21 @@ mod tests {
         stretch(&input, 2, 0.5, &mut phase, &mut slow);
         assert_eq!(slow.len(), 800);
         assert_eq!(&slow[..6], &[0, 0, 0, 0, 1, -1]);
+    }
+
+    #[test]
+    fn the_clock_waits_for_sound_that_stopped_coming() {
+        let shared = Shared::new(true);
+        let generation = shared.lock().seek_generation;
+        shared.sync(generation, 0, monotonic_ns());
+        std::thread::sleep(Duration::from_millis(400));
+        let stalled = shared.position_us();
+        assert!((HEARD_SLACK_NS / 1000..HEARD_SLACK_NS / 1000 + 20_000).contains(&stalled), "at {stalled} µs");
+        // The sound comes again: the clock follows it from there.
+        shared.sync(generation, 250_000, monotonic_ns());
+        std::thread::sleep(Duration::from_millis(50));
+        let resumed = shared.position_us();
+        assert!((290_000..330_000).contains(&resumed), "at {resumed} µs");
     }
 
     #[test]
