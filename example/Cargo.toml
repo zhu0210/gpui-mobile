@@ -14,11 +14,16 @@ path = "src/lib.rs"
 name = "gpui-example"
 path = "src/main.rs"
 
+[features]
+# Plays the video screen's clips through FFmpeg too (needs FFmpeg's libraries:
+# `scripts/build-ffmpeg-android.sh`; `build.sh` turns this on when FFMPEG_DIR is set).
+ffmpeg = ["gpui-mobile/ffmpeg"]
+
 [dependencies]
 # Pin the mobile facade support without requiring a published crate. The fork's
 # `mobile` branch is v0.8.1 plus fixes not yet in longbridge/gpui-kit.
 gpui-kit = { git = "https://github.com/zhu0210/gpui-kit", rev = "aa705a178892be00f714bd70f6c4added25155bf", default-features = false, features = ["component"] }
-gpui-mobile = { package = "gpui-pre-mobile", path = "..", version = "0.1.0" }
+gpui-mobile = { package = "gpui-pre-mobile", path = "..", version = "0.1.0", features = ["media"] }
 gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false }
 reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.10" }
 reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features = false, features = ["rustls-tls"] }
@@ -30,6 +35,11 @@ objc2 = "0.6"
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15"
 android-activity = { version = "0.6", features = ["native-activity"] }
+
+# `gpui-mobile`'s `media` feature draws video frames through the vendored
+# `gpui-pre-wgpu`'s external textures.
+[patch.crates-io]
+gpui-pre-wgpu = { path = "../vendor/gpui-pre-wgpu" }
 
 [profile.release]
 opt-level = "z"

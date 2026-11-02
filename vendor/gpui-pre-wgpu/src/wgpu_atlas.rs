@@ -1,12 +1,20 @@
 // Modified for gpui-pre (snapshot of zed@08cbb88): adapt device queues and sRGB detection to wgpu 30.0.1.
+// Modified for gpui-pre-mobile: external textures drawn in place of an image's tile.
 use anyhow::{Context as _, Result};
 use etagere::{BucketedAtlasAllocator, size2};
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
-    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
+    AtlasTile, Bounds, DevicePixels, ImageId, PlatformAtlas, Point, Size, TileId,
 };
 use parking_lot::Mutex;
-use std::{borrow::Cow, ops, sync::Arc};
+use std::{
+    borrow::Cow,
+    ops,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use crate::WgpuContext;
 
@@ -22,6 +30,84 @@ fn etagere_point_to_device(point: etagere::Point) -> Point<DevicePixels> {
 }
 
 pub struct WgpuAtlas(Mutex<AtlasState<WgpuAtlasTextures>>);
+
+struct ExternalTexture {
+    image_id: ImageId,
+    view: wgpu::TextureView,
+    size: Size<DevicePixels>,
+    generation: u64,
+}
+
+static EXTERNAL_TEXTURES: Mutex<Vec<ExternalTexture>> = Mutex::new(Vec::new());
+static NEXT_EXTERNAL_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Draws `texture` wherever `image_id` is painted with `Window::paint_image`,
+/// instead of uploading that image's bytes to the atlas.
+///
+/// This lets GPU-resident frames (decoded video, camera) reach the scene
+/// without a CPU copy and without changes to gpui's scene types. The texture
+/// must come from the renderer's device and be sampleable as a color texture
+/// (`Rgba8Unorm`/`Bgra8Unorm`). Calling this again replaces the texture; the
+/// renderer picks the new one up on its next frame.
+pub fn set_external_texture(image_id: ImageId, texture: &wgpu::Texture) {
+    let size = Size {
+        width: DevicePixels(texture.width() as i32),
+        height: DevicePixels(texture.height() as i32),
+    };
+    let external = ExternalTexture {
+        image_id,
+        view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        size,
+        generation: NEXT_EXTERNAL_GENERATION.fetch_add(1, Ordering::Relaxed),
+    };
+    let mut textures = EXTERNAL_TEXTURES.lock();
+    match textures.iter_mut().find(|t| t.image_id == image_id) {
+        Some(slot) => *slot = external,
+        None => textures.push(external),
+    }
+}
+
+/// Stops drawing the texture set by [`set_external_texture`] for `image_id`.
+pub fn remove_external_texture(image_id: ImageId) {
+    EXTERNAL_TEXTURES.lock().retain(|t| t.image_id != image_id);
+}
+
+// Counted down from the top of the range so they never meet the atlas's own
+// textures, which are numbered up from zero.
+fn external_texture_id(image_id: ImageId) -> AtlasTextureId {
+    AtlasTextureId {
+        index: u32::MAX - image_id.0 as u32,
+        kind: AtlasTextureKind::Polychrome,
+    }
+}
+
+fn external_tile(key: &AtlasKey) -> Option<AtlasTile> {
+    let AtlasKey::Image(params) = key else {
+        return None;
+    };
+    let textures = EXTERNAL_TEXTURES.lock();
+    let texture = textures.iter().find(|t| t.image_id == params.image_id)?;
+    Some(AtlasTile {
+        texture_id: external_texture_id(texture.image_id),
+        tile_id: TileId(0),
+        padding: 0,
+        bounds: Bounds {
+            origin: Point::default(),
+            size: texture.size,
+        },
+    })
+}
+
+fn external_texture_info(id: AtlasTextureId) -> Option<WgpuTextureInfo> {
+    let textures = EXTERNAL_TEXTURES.lock();
+    let texture = textures
+        .iter()
+        .find(|t| external_texture_id(t.image_id) == id)?;
+    Some(WgpuTextureInfo {
+        view: texture.view.clone(),
+        generation: texture.generation,
+    })
+}
 
 struct PendingUpload {
     id: AtlasTextureId,
@@ -81,6 +167,9 @@ impl WgpuAtlas {
     /// replays a paint from before the image was dropped, so callers must skip
     /// those sprites rather than assume the texture exists.
     pub fn get_texture_info(&self, id: AtlasTextureId) -> Option<WgpuTextureInfo> {
+        if let Some(info) = external_texture_info(id) {
+            return Some(info);
+        }
         let lock = self.0.lock();
         let texture = lock.backend.storage.get(id)?;
         Some(WgpuTextureInfo {
@@ -101,6 +190,8 @@ impl WgpuAtlas {
     /// Handles device lost by clearing all textures and cached tiles.
     /// The atlas will lazily recreate textures as needed on subsequent frames.
     pub fn handle_device_lost(&self, context: &WgpuContext) {
+        // External textures belong to the lost device; their owners register new ones.
+        EXTERNAL_TEXTURES.lock().clear();
         self.0.lock().clear(|textures| {
             textures.device = context.device.clone();
             textures.queue = context.queue.clone();
@@ -117,6 +208,9 @@ impl PlatformAtlas for WgpuAtlas {
         key: AtlasKey,
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>> {
+        if let Some(tile) = external_tile(&key) {
+            return Ok(Some(tile));
+        }
         self.0.lock().get_or_insert_with(key, build)
     }
 
@@ -545,6 +639,69 @@ mod tests {
 
         assert_eq!(second_tile.texture_id, first_tile.texture_id);
         assert_ne!(second_generation, first_generation);
+        Ok(())
+    }
+
+    #[test]
+    fn external_texture_replaces_image_tile() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device.clone(), queue, wgpu::TextureFormat::Bgra8Unorm);
+        let texture = |width| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let image_id = ImageId(usize::MAX - 7);
+        let key = AtlasKey::Image(RenderImageParams {
+            image_id,
+            frame_index: 0,
+        });
+        let mut get = || {
+            atlas
+                .get_or_insert_with(key.clone(), &mut || {
+                    Ok(Some((
+                        Size {
+                            width: DevicePixels(1),
+                            height: DevicePixels(1),
+                        },
+                        Cow::Owned(vec![0; 4]),
+                    )))
+                })
+                .expect("lookup should succeed")
+                .expect("callback returns Some")
+        };
+
+        set_external_texture(image_id, &texture(8));
+        let tile = get();
+        assert_eq!(tile.bounds.size.width, DevicePixels(8));
+        let first = atlas
+            .get_texture_info(tile.texture_id)
+            .context("external texture should be served")?
+            .generation;
+        set_external_texture(image_id, &texture(16));
+        let replaced = get();
+        assert_eq!(replaced.texture_id, tile.texture_id);
+        assert_eq!(replaced.bounds.size.width, DevicePixels(16));
+        let second = atlas
+            .get_texture_info(tile.texture_id)
+            .context("replaced texture should be served")?
+            .generation;
+        assert_ne!(first, second);
+
+        remove_external_texture(image_id);
+        assert!(atlas.get_texture_info(tile.texture_id).is_none());
+        assert_eq!(get().bounds.size.width, DevicePixels(1));
         Ok(())
     }
 

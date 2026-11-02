@@ -73,6 +73,18 @@ impl HasDisplayHandle for RawIosWindow {
     }
 }
 
+thread_local! {
+    /// The Metal context of the last window created, for code outside the
+    /// renderer that draws with the same device (`media`).
+    static GPU_CONTEXT: RefCell<Option<GpuContext>> = const { RefCell::new(None) };
+}
+
+/// The GPU context windows render with, once one exists. Main thread only.
+#[cfg_attr(not(feature = "media"), allow(dead_code))]
+pub(crate) fn gpu_context() -> Option<GpuContext> {
+    GPU_CONTEXT.with(|context| context.borrow().clone())
+}
+
 static METAL_VIEW_CLASS_REGISTERED: std::sync::Once = std::sync::Once::new();
 static VC_CLASS_REGISTERED: std::sync::Once = std::sync::Once::new();
 static TEXT_INPUT_VIEW_CLASS_REGISTERED: std::sync::Once = std::sync::Once::new();
@@ -777,6 +789,7 @@ impl IosWindow {
                         // reuses our Metal-backed context (and its instance)
                         // instead of creating a Vulkan+GL one.
                         let gpu_context: GpuContext = Rc::new(RefCell::new(Some(context)));
+                        GPU_CONTEXT.with(|slot| *slot.borrow_mut() = Some(gpu_context.clone()));
                         drop(surface); // no longer needed — new() creates its own
 
                         match WgpuRenderer::new(gpu_context, &raw_window, config, None) {

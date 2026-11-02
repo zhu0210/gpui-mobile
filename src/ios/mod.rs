@@ -19,6 +19,8 @@ mod text_input;
 mod text_system;
 pub mod util;
 mod window;
+#[cfg(feature = "media")]
+pub(crate) use window::gpu_context;
 
 pub(crate) use dispatcher::*;
 pub(crate) use display::*;

@@ -473,6 +473,25 @@ impl WgpuContext {
             .using_resolution(adapter.limits())
             .using_alignment(adapter.limits());
 
+        #[cfg(target_os = "android")]
+        if adapter.get_info().backend == wgpu::Backend::Vulkan {
+            match Self::create_android_vulkan_device(adapter, required_features, &required_limits)
+            {
+                Ok(Some((device, queue))) => {
+                    return Ok((
+                        device,
+                        queue,
+                        dual_source_blending,
+                        color_atlas_texture_format,
+                    ));
+                }
+                Ok(None) => log::info!(
+                    "Vulkan device cannot import AHardwareBuffers; video frames are unavailable"
+                ),
+                Err(error) => log::warn!("Could not enable AHardwareBuffer import: {error:#}"),
+            }
+        }
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("gpui_device"),
@@ -491,6 +510,87 @@ impl WgpuContext {
             dual_source_blending,
             color_atlas_texture_format,
         ))
+    }
+
+    /// Opens the Vulkan device with AHardwareBuffer import, foreign queue
+    /// ownership and YCbCr sampling, so decoded video buffers can be sampled
+    /// without a CPU copy. Returns `None` when the GPU lacks any of them.
+    // Ported from zhu0210/zed `gpui_wgpu_backend` (`create_vulkan_device_with_external_sync`).
+    #[cfg(target_os = "android")]
+    fn create_android_vulkan_device(
+        adapter: &wgpu::Adapter,
+        required_features: wgpu::Features,
+        required_limits: &wgpu::Limits,
+    ) -> anyhow::Result<Option<(wgpu::Device, wgpu::Queue)>> {
+        use ash::vk;
+
+        let hardware_buffer = ash::android::external_memory_android_hardware_buffer::NAME;
+        let queue_family_foreign = ash::ext::queue_family_foreign::NAME;
+        // SAFETY: The requested HAL API matches the backend reported by this adapter.
+        let Some(hal_adapter) = (unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }) else {
+            return Ok(None);
+        };
+        let capabilities = hal_adapter.physical_device_capabilities();
+        if !capabilities.supports_extension(hardware_buffer)
+            || !capabilities.supports_extension(queue_family_foreign)
+            || capabilities.properties().api_version < vk::API_VERSION_1_1
+        {
+            return Ok(None);
+        }
+        let mut ycbcr = vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default();
+        let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut ycbcr);
+        // SAFETY: this Vulkan 1.1 adapter owns the physical device, and the
+        // feature output chain contains live, exclusively borrowed storage.
+        unsafe {
+            hal_adapter
+                .shared_instance()
+                .raw_instance()
+                .get_physical_device_features2(hal_adapter.raw_physical_device(), &mut features);
+        }
+        if ycbcr.sampler_ycbcr_conversion != vk::TRUE {
+            return Ok(None);
+        }
+
+        // Must outlive the callback and vkCreateDevice: HAL calls the callback
+        // first and builds its final create-info chain afterwards.
+        let mut ycbcr_features =
+            vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default().sampler_ycbcr_conversion(true);
+        let ycbcr_features = &mut ycbcr_features;
+        let callback: Box<wgpu::hal::vulkan::CreateDeviceCallback<'_>> = Box::new(move |args| {
+            for extension in [hardware_buffer, queue_family_foreign] {
+                if !args.extensions.contains(&extension) {
+                    args.extensions.push(extension);
+                }
+            }
+            // HAL tracks this feature but leaves it out of its device feature
+            // chain, so add it through the callback's pNext extension point.
+            *args.create_info = std::mem::take(args.create_info).push_next(ycbcr_features);
+        });
+        // SAFETY: The HAL adapter belongs to this wgpu adapter and the callback
+        // only enables extensions and a feature its physical device advertises.
+        let hal_device = unsafe {
+            hal_adapter
+                .open_with_callback(
+                    required_features,
+                    required_limits,
+                    &wgpu::MemoryHints::MemoryUsage,
+                    Some(callback),
+                )
+                .map_err(|error| anyhow::anyhow!("opening Vulkan HAL device: {error:?}"))?
+        };
+        let descriptor = wgpu::DeviceDescriptor {
+            label: Some("gpui_device"),
+            required_features,
+            required_limits: required_limits.clone(),
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            trace: wgpu::Trace::Off,
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        };
+        // SAFETY: `hal_device` was opened from this adapter with the same
+        // features and limits as `descriptor`.
+        let (device, queue) = unsafe { adapter.create_device_from_hal(hal_device, &descriptor) }
+            .map_err(|error| anyhow::anyhow!("creating Vulkan wgpu device: {error}"))?;
+        Ok(Some((device, queue)))
     }
 
     #[cfg(not(target_family = "wasm"))]

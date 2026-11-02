@@ -43,6 +43,9 @@ unicode-segmentation = { workspace = true }
 gpui_util = { workspace = true }
 font-kit = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "android")'.dependencies]
+ash = "0.38"
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 wgpu = { workspace = true, features = ["std", "metal", "gles", "vulkan", "wgsl", "webgpu"] }
 
