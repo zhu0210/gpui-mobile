@@ -33,6 +33,10 @@ pub struct WebViewSettings {
     /// below the top of the screen, leaving room for a GPUI-rendered app bar.
     /// Default: 0.0 (fullscreen).
     pub top_offset: f32,
+    /// Navigations to URLs starting with this are stopped and handed to the app
+    /// through [`WebViewHandle::take_intercepted`], such as a sign-in page's
+    /// redirect back to the app. Default: none.
+    pub intercept: Option<String>,
 }
 
 impl Default for WebViewSettings {
@@ -43,6 +47,7 @@ impl Default for WebViewSettings {
             zoom_enabled: true,
             dom_storage_enabled: true,
             top_offset: 0.0,
+            intercept: None,
         }
     }
 }
@@ -85,6 +90,9 @@ fn settings_to_creation_params(
     );
     if let Some(ref ua) = settings.user_agent {
         params.insert("user_agent".to_string(), ua.clone());
+    }
+    if let Some(ref prefix) = settings.intercept {
+        params.insert("intercept".to_string(), prefix.clone());
     }
     params
 }
@@ -239,6 +247,18 @@ impl WebViewHandle {
     /// Get the platform view handle for embedding in a GPUI element.
     pub fn platform_view_handle(&self) -> Option<Arc<PlatformViewHandle>> {
         self.platform_handle.clone()
+    }
+
+    /// The last navigation stopped by [`WebViewSettings::intercept`], once.
+    // ponytail: one slot for the whole app, so one intercepting WebView at a time;
+    // key it by view id if two ever need to intercept together.
+    pub fn take_intercepted(&self) -> Option<String> {
+        #[cfg(target_os = "android")]
+        return android::take_intercepted();
+        #[cfg(target_os = "ios")]
+        return crate::ios::platform_view::take_intercepted();
+        #[allow(unreachable_code)]
+        None
     }
 }
 

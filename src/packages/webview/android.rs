@@ -74,3 +74,32 @@ pub fn stop_loading(handle: &WebViewHandle) -> Result<(), String> {
         Ok(())
     })
 }
+
+const PLATFORM_VIEW_CLASS: &str = "dev.gpui.mobile.GpuiPlatformView";
+
+pub fn take_intercepted() -> Option<String> {
+    jni_helpers::with_env(|env| {
+        let cls = jni_helpers::find_app_class(env, PLATFORM_VIEW_CLASS)?;
+        let url = env
+            .call_static_method(
+                &cls,
+                jni::jni_str!("takeIntercepted"),
+                jni::jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )
+            .map_err(|e| {
+                env.exception_clear();
+                e.to_string()
+            })?
+            .l()
+            .e()?;
+        if url.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(jni_helpers::get_string(env, &url)))
+    })
+    .unwrap_or_else(|error: String| {
+        log::error!("webview: reading the intercepted navigation failed: {error}");
+        None
+    })
+}
