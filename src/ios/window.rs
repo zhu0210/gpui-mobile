@@ -114,8 +114,8 @@ fn register_view_controller_class() -> &'static AnyClass {
             }
         }
 
-        extern "C" fn prefers_hidden(_this: *mut AnyObject, _sel: Sel) -> bool {
-            IMMERSIVE.load(std::sync::atomic::Ordering::Relaxed)
+        extern "C" fn prefers_hidden(_this: *mut AnyObject, _sel: Sel) -> objc2::runtime::Bool {
+            objc2::runtime::Bool::new(IMMERSIVE.load(std::sync::atomic::Ordering::Relaxed))
         }
 
         // Override viewDidLayoutSubviews — called by UIKit on rotation,
@@ -146,8 +146,8 @@ fn register_view_controller_class() -> &'static AnyClass {
                 sel!(preferredStatusBarStyle),
                 preferred_status_bar_style as extern "C" fn(*mut AnyObject, Sel) -> isize,
             );
-            decl.add_method(sel!(prefersStatusBarHidden), prefers_hidden as extern "C" fn(*mut AnyObject, Sel) -> bool);
-            decl.add_method(sel!(prefersHomeIndicatorAutoHidden), prefers_hidden as extern "C" fn(*mut AnyObject, Sel) -> bool);
+            decl.add_method(sel!(prefersStatusBarHidden), prefers_hidden as extern "C" fn(*mut AnyObject, Sel) -> objc2::runtime::Bool);
+            decl.add_method(sel!(prefersHomeIndicatorAutoHidden), prefers_hidden as extern "C" fn(*mut AnyObject, Sel) -> objc2::runtime::Bool);
             decl.add_method(
                 sel!(viewDidLayoutSubviews),
                 view_did_layout_subviews as extern "C" fn(*mut AnyObject, Sel),
