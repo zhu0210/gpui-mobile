@@ -1804,7 +1804,8 @@ impl PlatformWindow for AndroidPlatformWindow {
 
         // Preserve raw contacts so GPUI can arbitrate long presses, claimed
         // control drags and ordinary pans, including hover suppression and inertia.
-        // `FlingGuard` keeps a contact that stops a fling from inheriting its axis.
+        // `FlingGuard` keeps a contact that stops a fling from inheriting its axis;
+        // `Pinch` turns two fingers into pinches, which GPUI doesn't recognize yet.
         {
             let cb = Arc::clone(&input_cb);
             let window = Arc::downgrade(&self.window);
@@ -1816,6 +1817,7 @@ impl PlatformWindow for AndroidPlatformWindow {
             };
             let mut active_touches = HashMap::new();
             let mut fling_guard = crate::fling_guard::FlingGuard::new();
+            let mut pinch = crate::pinch::Pinch::new();
             self.window.on_touch(move |touch| {
                 let phase = match touch.action {
                     0 => gpui::TouchPhase::Started,
@@ -1847,9 +1849,18 @@ impl PlatformWindow for AndroidPlatformWindow {
                     force: None,
                 };
                 let mut cb = cb.lock();
-                fling_guard.relay(event, &mut next_touch_id, |event| {
-                    cb(gpui::PlatformInput::Touch(event));
-                });
+                for relayed in pinch.relay(event) {
+                    match relayed {
+                        crate::pinch::Relayed::Touch(event) => {
+                            fling_guard.relay(event, &mut next_touch_id, |event| {
+                                cb(gpui::PlatformInput::Touch(event));
+                            })
+                        }
+                        crate::pinch::Relayed::Pinch(event) => {
+                            cb(gpui::PlatformInput::Pinch(event));
+                        }
+                    }
+                }
                 if matches!(phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled) {
                     active_touches.remove(&touch.id);
                 }
