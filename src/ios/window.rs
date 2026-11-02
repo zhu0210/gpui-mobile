@@ -1442,6 +1442,16 @@ impl PlatformWindow for IosWindow {
         self.input_handler.borrow_mut().take()
     }
 
+    fn text_input_state_changed(&self, change: gpui::TextInputStateChange) {
+        match change {
+            gpui::TextInputStateChange::FocusGained => {
+                self.show_keyboard_with_type(crate::KeyboardType::Default)
+            }
+            gpui::TextInputStateChange::FocusLost => self.hide_keyboard(),
+            _ => {}
+        }
+    }
+
     fn prompt(
         &self,
         _level: PromptLevel,
