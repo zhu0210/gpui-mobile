@@ -27,6 +27,7 @@ use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 use super::input::{Opened, Origin};
 use super::planes::Picture;
+use super::Track;
 use anyhow::{anyhow, bail, Context as _, Result};
 use ffmpeg_next as ffmpeg;
 use ffmpeg::ffi;
@@ -64,7 +65,10 @@ pub(super) struct VideoInfo {
     /// Clockwise degrees to turn the picture for display.
     pub rotation: i32,
     pub duration_us: i64,
-    pub has_audio: bool,
+    /// The audio stream played unless another is chosen.
+    pub audio_track: Option<usize>,
+    pub audio_tracks: Vec<Track>,
+    pub subtitle_tracks: Vec<Track>,
 }
 
 pub(super) fn probe(origin: &Origin) -> Result<VideoInfo> {
@@ -92,8 +96,207 @@ pub(super) fn probe(origin: &Origin) -> Result<VideoInfo> {
         height,
         rotation,
         duration_us,
-        has_audio: input.streams().best(ffmpeg::media::Type::Audio).is_some(),
+        audio_track: input.streams().best(ffmpeg::media::Type::Audio).map(|stream| stream.index()),
+        audio_tracks: tracks(&input, ffmpeg::media::Type::Audio),
+        subtitle_tracks: tracks(&input, ffmpeg::media::Type::Subtitle),
     })
+}
+
+/// The input's streams of `kind`, text ones only for subtitles.
+fn tracks(input: &ffmpeg::format::context::Input, kind: ffmpeg::media::Type) -> Vec<Track> {
+    input
+        .streams()
+        .filter(|stream| stream.parameters().medium() == kind)
+        .filter_map(|stream| {
+            let codec = stream.parameters().id();
+            // SAFETY: a plain lookup; a known id has a descriptor.
+            let text = unsafe {
+                let descriptor = ffi::avcodec_descriptor_get(codec.into());
+                !descriptor.is_null() && (*descriptor).props & ffi::AV_CODEC_PROP_TEXT_SUB as i32 != 0
+            };
+            if kind == ffmpeg::media::Type::Subtitle && !text {
+                return None;
+            }
+            let metadata = stream.metadata();
+            let tag = |key| metadata.get(key).filter(|value| !value.is_empty()).map(str::to_owned);
+            Some(Track {
+                id: stream.index(),
+                language: tag("language").filter(|language| language != "und"),
+                // MP4 keeps the title as `name`.
+                title: tag("title").or_else(|| tag("name")),
+                codec: codec.name().to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// A subtitle cue, in media time.
+#[derive(Clone, Debug)]
+pub(super) struct Cue {
+    pub start_us: i64,
+    pub end_us: i64,
+    pub text: String,
+}
+
+/// What the UI chose, and what the playback threads found, shared between
+/// them.
+#[derive(Default)]
+pub(super) struct Choices {
+    /// The audio stream, from the next seek on.
+    pub audio: Option<usize>,
+    /// The subtitle stream, from the next seek on.
+    pub subtitle: Option<usize>,
+    /// The chosen subtitle stream's cues demuxed since the last seek.
+    pub cues: Vec<Cue>,
+    /// The furthest media time demuxed since the last seek.
+    pub demuxed_us: i64,
+    /// Software-decoded frames taller than this are scaled down to it.
+    pub max_height: Option<u32>,
+}
+
+/// The track, subtitle and size choices of an FFmpeg player, on every
+/// platform.
+pub(super) struct Controls {
+    choices: Arc<Mutex<Choices>>,
+    shared: Arc<super::player::Shared>,
+    audio_tracks: Vec<Track>,
+    subtitle_tracks: Vec<Track>,
+    /// Whether the input is a local file, all of it at hand.
+    local: bool,
+    duration_us: i64,
+}
+
+impl Controls {
+    pub fn new(origin: &Origin, info: &VideoInfo, choices: Arc<Mutex<Choices>>, shared: Arc<super::player::Shared>) -> Self {
+        Self {
+            choices,
+            shared,
+            audio_tracks: info.audio_tracks.clone(),
+            subtitle_tracks: info.subtitle_tracks.clone(),
+            local: matches!(origin, Origin::File(_)),
+            duration_us: info.duration_us,
+        }
+    }
+
+    fn choices(&self) -> std::sync::MutexGuard<'_, Choices> {
+        self.choices.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Seeks to where playback is, so that the playback threads pick up a
+    /// new choice from there.
+    fn refresh(&self) {
+        self.shared.seek(self.shared.position_us().clamp(0, self.duration_us));
+    }
+
+    pub fn audio_tracks(&self) -> &[Track] {
+        &self.audio_tracks
+    }
+
+    pub fn audio_track(&self) -> Option<usize> {
+        self.choices().audio
+    }
+
+    pub fn set_audio_track(&self, id: usize) {
+        if !self.audio_tracks.iter().any(|track| track.id == id) || self.choices().audio == Some(id) {
+            return;
+        }
+        self.choices().audio = Some(id);
+        self.refresh();
+    }
+
+    pub fn subtitle_tracks(&self) -> &[Track] {
+        &self.subtitle_tracks
+    }
+
+    pub fn subtitle_track(&self) -> Option<usize> {
+        self.choices().subtitle
+    }
+
+    pub fn set_subtitle_track(&self, id: Option<usize>) {
+        let id = id.filter(|id| self.subtitle_tracks.iter().any(|track| track.id == *id));
+        if self.choices().subtitle == id {
+            return;
+        }
+        let mut choices = self.choices();
+        choices.subtitle = id;
+        choices.cues.clear();
+        drop(choices);
+        // From the seek on, the cue showing now is demuxed again.
+        self.refresh();
+    }
+
+    pub fn subtitle_text(&self) -> Option<String> {
+        let position = self.shared.position_us();
+        self.choices().text_at(position)
+    }
+
+    pub fn buffered_us(&self) -> i64 {
+        if self.local {
+            return self.duration_us;
+        }
+        self.choices().demuxed_us.max(self.shared.position_us()).clamp(0, self.duration_us)
+    }
+
+    pub fn set_max_height(&self, height: Option<u32>) {
+        self.choices().max_height = height;
+    }
+}
+
+/// Cues kept at most; older ones go first.
+const MAX_CUES: usize = 64;
+
+impl Choices {
+    pub fn new(info: &VideoInfo) -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self {
+            audio: info.audio_track,
+            ..Self::default()
+        }))
+    }
+
+    /// The text of the cues showing at `position_us`, one per line.
+    pub fn text_at(&mut self, position_us: i64) -> Option<String> {
+        self.cues.retain(|cue| cue.end_us > position_us || cue.start_us > position_us);
+        let lines: Vec<&str> = self
+            .cues
+            .iter()
+            .filter(|cue| cue.start_us <= position_us)
+            .map(|cue| cue.text.as_str())
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("\n"))
+    }
+}
+
+/// An ASS dialogue line as FFmpeg's text decoders give it
+/// (`ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text`), as
+/// plain text: override blocks dropped, `\N` as a line break.
+fn ass_text(line: &str) -> String {
+    let text = line.splitn(9, ',').nth(8).unwrap_or(line);
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => {
+                for c in chars.by_ref() {
+                    if c == '}' {
+                        break;
+                    }
+                }
+            }
+            '\\' => match chars.peek() {
+                Some('N' | 'n') => {
+                    chars.next();
+                    plain.push('\n');
+                }
+                Some('h') => {
+                    chars.next();
+                    plain.push(' ');
+                }
+                _ => plain.push(c),
+            },
+            c => plain.push(c),
+        }
+    }
+    plain.trim().to_owned()
 }
 
 /// The display matrix's rotation, as clockwise degrees in steps of 90.
@@ -132,29 +335,155 @@ struct Demuxer {
     /// A packet the decoder had no room for yet.
     pending: Option<ffmpeg::Packet>,
     input_done: bool,
+    choices: Arc<Mutex<Choices>>,
+    /// The chosen subtitle stream, decoded on the side (video only).
+    subtitles: Option<(usize, ffmpeg::decoder::Subtitle)>,
+    /// Whether streams nobody reads are skipped.
+    discard: bool,
 }
 
 impl Demuxer {
-    fn open(origin: &Origin, kind: ffmpeg::media::Type) -> Result<(Self, ffmpeg::codec::Parameters)> {
+    /// Opens the input on stream `index`, or the best of `kind`.
+    fn open(
+        origin: &Origin,
+        kind: ffmpeg::media::Type,
+        index: Option<usize>,
+        choices: Arc<Mutex<Choices>>,
+    ) -> Result<(Self, ffmpeg::codec::Parameters)> {
         let input = open_input(origin)?;
-        let stream = input.streams().best(kind).ok_or_else(|| anyhow!("no {kind:?} stream"))?;
-        let (index, time_base, parameters) = (stream.index(), stream.time_base(), stream.parameters());
+        let index = match index {
+            Some(index) => index,
+            None => input.streams().best(kind).ok_or_else(|| anyhow!("no {kind:?} stream"))?.index(),
+        };
         // SAFETY: reads a field of the open input.
         let start_us = match unsafe { (*input.as_ptr()).start_time } {
             ffi::AV_NOPTS_VALUE => 0,
             start => start,
         };
-        Ok((
-            Self {
-                input,
-                stream: index,
-                time_base,
-                start_us,
-                pending: None,
-                input_done: false,
-            },
-            parameters,
-        ))
+        let mut demuxer = Self {
+            input,
+            stream: index,
+            time_base: MICROS,
+            start_us,
+            pending: None,
+            input_done: false,
+            choices,
+            subtitles: None,
+            // ponytail: FFmpeg's `hls` demuxer drops the timestamps of the
+            // streams left when others in their segments are discarded; skip
+            // whole variant playlists once multi-variant HLS matters.
+            discard: !matches!(origin, Origin::Hls { .. }),
+        };
+        let parameters = demuxer.switch(index)?;
+        Ok((demuxer, parameters))
+    }
+
+    /// Reads stream `index` from now on, and with it the chosen subtitles
+    /// when they are decoded here; returns the stream's parameters.
+    fn switch(&mut self, index: usize) -> Result<ffmpeg::codec::Parameters> {
+        let stream = self.input.stream(index).ok_or_else(|| anyhow!("no stream {index}"))?;
+        (self.stream, self.time_base) = (index, stream.time_base());
+        let parameters = stream.parameters();
+        self.discard_others();
+        Ok(parameters)
+    }
+
+    /// Skips the streams nobody here reads: FFmpeg doesn't hand out their
+    /// packets, and HLS doesn't fetch their playlists.
+    fn discard_others(&mut self) {
+        if !self.discard {
+            return;
+        }
+        let keep = [Some(self.stream), self.subtitles.as_ref().map(|(index, _)| *index)];
+        // SAFETY: the streams belong to the open input.
+        unsafe {
+            let raw = &*self.input.as_ptr();
+            for index in 0..raw.nb_streams as usize {
+                (**raw.streams.add(index)).discard = if keep.contains(&Some(index)) {
+                    ffi::AVDiscard::AVDISCARD_DEFAULT
+                } else {
+                    ffi::AVDiscard::AVDISCARD_ALL
+                };
+            }
+        }
+    }
+
+    /// Decodes the subtitle stream chosen since the last call (on the video
+    /// thread, from the packets it reads anyway).
+    fn choose_subtitles(&mut self) -> Result<()> {
+        let wanted = self.choices.lock().unwrap_or_else(PoisonError::into_inner).subtitle;
+        if wanted == self.subtitles.as_ref().map(|(index, _)| *index) {
+            return Ok(());
+        }
+        self.subtitles = match wanted {
+            Some(index) => {
+                let stream = self.input.stream(index).ok_or_else(|| anyhow!("no stream {index}"))?;
+                let mut context = ffmpeg::codec::Context::from_parameters(stream.parameters())?;
+                // SAFETY: the context is not open yet.
+                unsafe { (*context.as_mut_ptr()).pkt_timebase = stream.time_base().into() };
+                Some((index, context.decoder().subtitle()?))
+            }
+            None => None,
+        };
+        self.discard_others();
+        Ok(())
+    }
+
+    /// Decodes a subtitle packet into a cue.
+    fn add_cue(&mut self, packet: &ffmpeg::Packet) {
+        let Some((index, decoder)) = &mut self.subtitles else { return };
+        if packet.stream() != *index {
+            return;
+        }
+        let mut subtitle = ffmpeg::Subtitle::new();
+        match decoder.decode(packet, &mut subtitle) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                log::warn!("video: subtitle packet skipped: {error}");
+                return;
+            }
+        }
+        let text: Vec<String> = subtitle
+            .rects()
+            .filter_map(|rect| match rect {
+                ffmpeg::codec::subtitle::Rect::Ass(ass) => Some(ass_text(ass.get())),
+                ffmpeg::codec::subtitle::Rect::Text(text) => Some(text.get().trim().to_owned()),
+                _ => None,
+            })
+            .filter(|text| !text.is_empty())
+            .collect();
+        if text.is_empty() {
+            return;
+        }
+        let Some(time_base) = self.input.stream(*index).map(|stream| stream.time_base()) else { return };
+        let start_us = packet.pts().map_or(0, |pts| pts.rescale(time_base, MICROS) - self.start_us)
+            + subtitle.start() as i64 * 1000;
+        let end_us = match subtitle.end() {
+            // Until the next cue, as players show it: a few seconds.
+            0 | u32::MAX if packet.duration() <= 0 => start_us + 5_000_000,
+            0 | u32::MAX => start_us + packet.duration().rescale(time_base, MICROS),
+            end => start_us - subtitle.start() as i64 * 1000 + end as i64 * 1000,
+        };
+        let mut choices = self.choices.lock().unwrap_or_else(PoisonError::into_inner);
+        if choices.cues.len() == MAX_CUES {
+            choices.cues.remove(0);
+        }
+        choices.cues.push(Cue {
+            start_us,
+            end_us,
+            text: text.join("\n"),
+        });
+    }
+
+    /// Notes that the input has data up to `packet`.
+    fn demuxed(&self, packet: &ffmpeg::Packet) {
+        let Some(time_base) = self.input.stream(packet.stream()).map(|stream| stream.time_base()) else { return };
+        if let Some(ts) = packet.pts().or(packet.dts()) {
+            let us = ts.rescale(time_base, MICROS) - self.start_us;
+            let mut choices = self.choices.lock().unwrap_or_else(PoisonError::into_inner);
+            choices.demuxed_us = choices.demuxed_us.max(us);
+        }
     }
 
     /// Gives the decoder the next packet, if it takes one.
@@ -167,8 +496,11 @@ impl Demuxer {
             None => loop {
                 let mut packet = ffmpeg::Packet::empty();
                 match packet.read(&mut self.input) {
-                    Ok(()) if packet.stream() == self.stream => break packet,
-                    Ok(()) => continue,
+                    Ok(()) if packet.stream() == self.stream => {
+                        self.demuxed(&packet);
+                        break packet;
+                    }
+                    Ok(()) => self.add_cue(&packet),
                     Err(ffmpeg::Error::Eof) => {
                         decoder.send_eof()?;
                         self.input_done = true;
@@ -195,6 +527,16 @@ impl Demuxer {
         // comes before the target.
         let target = target_us.saturating_add(self.start_us);
         self.input.seek(target, ..target.saturating_add(1)).context("seeking")?;
+        {
+            let mut choices = self.choices.lock().unwrap_or_else(PoisonError::into_inner);
+            choices.demuxed_us = target_us;
+            if self.subtitles.is_some() {
+                choices.cues.clear();
+            }
+        }
+        if let Some((_, subtitles)) = &mut self.subtitles {
+            subtitles.flush();
+        }
         decoder.flush();
         self.pending = None;
         self.input_done = false;
@@ -247,8 +589,9 @@ impl FfmpegVideo {
         origin: &Origin,
         hardware: Option<HardwareTarget>,
         slot: Arc<Mutex<Option<Picture>>>,
+        choices: Arc<Mutex<Choices>>,
     ) -> Result<(Self, bool)> {
-        let (demuxer, parameters) = Demuxer::open(origin, ffmpeg::media::Type::Video)?;
+        let (demuxer, parameters) = Demuxer::open(origin, ffmpeg::media::Type::Video, None, choices)?;
         let hardware = match hardware {
             Some(target) => match open_hardware(&parameters, demuxer.time_base, target) {
                 Ok(decoder) => Some(decoder),
@@ -287,21 +630,36 @@ impl FfmpegVideo {
         ))
     }
 
+    /// The frame as 8-bit 4:2:0, no taller than the chosen maximum height.
     fn yuv420p(&mut self, frame: ffmpeg::frame::Video) -> Result<ffmpeg::frame::Video> {
-        if frame.format() == Pixel::YUV420P {
+        let max_height = self.demuxer.choices.lock().unwrap_or_else(PoisonError::into_inner).max_height;
+        let (width, height) = match max_height {
+            Some(max) if frame.height() > max.max(2) => {
+                let max = max.max(2) & !1;
+                ((frame.width() as u64 * max as u64 / frame.height() as u64) as u32 & !1, max)
+            }
+            _ => (frame.width(), frame.height()),
+        };
+        if frame.format() == Pixel::YUV420P && height == frame.height() {
             return Ok(frame);
         }
         // ponytail: 10-bit and 4:4:4 go through swscale to 8-bit 4:2:0; upload
         // them natively if the software path ever matters for them.
         let scaler = match &mut self.scaler {
-            Some(scaler) if scaler.input().format == frame.format() => scaler,
+            Some(scaler)
+                if scaler.input().format == frame.format()
+                    && (scaler.input().width, scaler.input().height) == (frame.width(), frame.height())
+                    && (scaler.output().width, scaler.output().height) == (width, height) =>
+            {
+                scaler
+            }
             scaler => scaler.insert(ffmpeg::software::scaling::Context::get(
                 frame.format(),
                 frame.width(),
                 frame.height(),
                 Pixel::YUV420P,
-                frame.width(),
-                frame.height(),
+                width,
+                height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             )?),
         };
@@ -551,6 +909,7 @@ impl VideoSource for FfmpegVideo {
     type Frame = Frame;
 
     fn seek(&mut self, target_us: i64) -> Result<()> {
+        self.demuxer.choose_subtitles()?;
         self.demuxer.seek(target_us, &mut self.decoder)
     }
 
@@ -608,29 +967,25 @@ pub(super) struct FfmpegAudio {
     resampler: Option<ffmpeg::software::resampling::Context>,
     /// The current output: interleaved 16-bit samples and their channel count.
     samples: Vec<i16>,
+    /// Whether a track switch changed the format, to report it next.
+    switched: bool,
 }
 
 // SAFETY: the source moves to its playback thread and is only used there.
 unsafe impl Send for FfmpegAudio {}
 
 impl FfmpegAudio {
-    pub fn open(origin: &Origin) -> Result<Self> {
-        let (demuxer, parameters) = Demuxer::open(origin, ffmpeg::media::Type::Audio)?;
-        let mut context = ffmpeg::codec::Context::from_parameters(parameters)?;
-        // SAFETY: the context is not open yet.
-        unsafe { (*context.as_mut_ptr()).pkt_timebase = demuxer.time_base.into() };
-        let decoder = context.decoder().audio()?;
-        log::info!(
-            "video: FFmpeg audio {} decoder, {} Hz, {} channels",
-            decoder.codec().map_or_else(|| "?".into(), |codec| codec.name().to_owned()),
-            decoder.rate(),
-            decoder.channels(),
-        );
+    /// Opens the chosen audio stream, or the best one.
+    pub fn open(origin: &Origin, choices: Arc<Mutex<Choices>>) -> Result<Self> {
+        let index = choices.lock().unwrap_or_else(PoisonError::into_inner).audio;
+        let (demuxer, parameters) = Demuxer::open(origin, ffmpeg::media::Type::Audio, index, choices)?;
+        let decoder = open_audio(parameters, demuxer.time_base)?;
         Ok(Self {
             demuxer,
             decoder,
             resampler: None,
             samples: Vec::new(),
+            switched: false,
         })
     }
 
@@ -640,16 +995,39 @@ impl FfmpegAudio {
     }
 }
 
+fn open_audio(parameters: ffmpeg::codec::Parameters, time_base: ffmpeg::Rational) -> Result<ffmpeg::decoder::Audio> {
+    let mut context = ffmpeg::codec::Context::from_parameters(parameters)?;
+    // SAFETY: the context is not open yet.
+    unsafe { (*context.as_mut_ptr()).pkt_timebase = time_base.into() };
+    let decoder = context.decoder().audio()?;
+    log::info!(
+        "video: FFmpeg audio {} decoder, {} Hz, {} channels",
+        decoder.codec().map_or_else(|| "?".into(), |codec| codec.name().to_owned()),
+        decoder.rate(),
+        decoder.channels(),
+    );
+    Ok(decoder)
+}
+
 impl AudioSource for FfmpegAudio {
     fn format(&self) -> Result<(i32, i32)> {
         Ok((self.decoder.rate() as i32, self.output_channels()))
     }
 
     fn seek(&mut self, target_us: i64) -> Result<()> {
+        let wanted = self.demuxer.choices.lock().unwrap_or_else(PoisonError::into_inner).audio;
+        if let Some(index) = wanted.filter(|&index| index != self.demuxer.stream) {
+            let parameters = self.demuxer.switch(index)?;
+            self.decoder = open_audio(parameters, self.demuxer.time_base)?;
+            (self.resampler, self.switched) = (None, true);
+        }
         self.demuxer.seek(target_us, &mut self.decoder)
     }
 
     fn next(&mut self) -> Result<AudioOutput> {
+        if std::mem::take(&mut self.switched) {
+            return Ok(AudioOutput::Format(self.format()?));
+        }
         let mut frame = ffmpeg::frame::Audio::empty();
         match self.decoder.receive_frame(&mut frame) {
             Ok(()) => {}
@@ -741,6 +1119,7 @@ pub(super) struct FfmpegPlayer<P: Platform> {
     shared: Arc<Shared>,
     threads: Vec<std::thread::JoinHandle<()>>,
     slot: Arc<Mutex<Option<Picture>>>,
+    controls: Controls,
     uploader: RefCell<super::planes::Uploader>,
     frames_shown: Cell<u64>,
     last_import: Cell<Option<Instant>>,
@@ -757,9 +1136,10 @@ impl<P: Platform> FfmpegPlayer<P> {
             _ => P::hardware(P::context().as_ref()),
         };
         let slot = Arc::new(Mutex::new(None));
-        let (mut video, _) = FfmpegVideo::open(&origin, hardware, slot.clone())?;
-        let audio = if info.has_audio {
-            FfmpegAudio::open(&origin)
+        let choices = Choices::new(&info);
+        let (mut video, _) = FfmpegVideo::open(&origin, hardware, slot.clone(), choices.clone())?;
+        let audio = if info.audio_track.is_some() {
+            FfmpegAudio::open(&origin, choices.clone())
                 .map_err(|error| log::warn!("video: audio stream skipped: {error:#}"))
                 .ok()
         } else {
@@ -808,6 +1188,7 @@ impl<P: Platform> FfmpegPlayer<P> {
             rotation: info.rotation,
             duration_us: info.duration_us,
             has_audio: threads.len() > 1,
+            controls: Controls::new(&origin, &info, choices, shared.clone()),
             shared,
             threads,
             slot,
@@ -862,6 +1243,38 @@ impl<P: Platform> FfmpegPlayer<P> {
         self.shared.is_active(self.last_import.get())
     }
 
+    pub fn set_rate(&self, rate: f32) {
+        self.shared.set_rate(rate as f64)
+    }
+
+    pub fn rate(&self) -> f32 {
+        self.shared.rate() as f32
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        self.shared.set_volume(volume)
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.shared.volume()
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.shared.set_muted(muted)
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.shared.is_muted()
+    }
+
+    pub fn buffered(&self) -> Duration {
+        Duration::from_micros(self.controls.buffered_us() as u64)
+    }
+
+    pub fn controls(&self) -> Option<&Controls> {
+        Some(&self.controls)
+    }
+
     /// Imports the newest decoded picture, if there is one, and makes it the
     /// texture drawn for `image_id`.
     pub fn update(&self, image_id: ImageId) -> Result<()> {
@@ -901,5 +1314,27 @@ impl<P: Platform> Drop for FfmpegPlayer<P> {
         if self.has_audio {
             P::audio_stopped();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ass_lines_become_plain_text() {
+        assert_eq!(ass_text(r"0,0,Default,,0,0,0,,{\i1}Styled, with commas{\i0}\NNext\hrow"), "Styled, with commas\nNext row");
+        assert_eq!(ass_text("3,0,Default,,0,0,0,,plain"), "plain");
+    }
+
+    #[test]
+    fn cues_show_while_they_last() {
+        let mut choices = Choices::default();
+        let cue = |start_us, end_us, text: &str| Cue { start_us, end_us, text: text.into() };
+        choices.cues = vec![cue(0, 2_000_000, "one"), cue(1_000_000, 3_000_000, "two"), cue(5_000_000, 6_000_000, "later")];
+        assert_eq!(choices.text_at(1_500_000).as_deref(), Some("one\ntwo"));
+        assert_eq!(choices.text_at(4_000_000), None);
+        assert_eq!(choices.cues.len(), 1, "ended cues are dropped");
+        assert_eq!(choices.text_at(5_000_000).as_deref(), Some("later"));
     }
 }

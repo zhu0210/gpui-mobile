@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// A decoded frame waiting for the main thread: 8-bit 4:2:0 planes, or a
 /// VideoToolbox pixel buffer (iOS) or VA-API surface (Linux).
 pub(super) struct Picture {
-    frame: ffmpeg_next::frame::Video,
+    pub frame: ffmpeg_next::frame::Video,
     pub timestamp_us: i64,
 }
 
