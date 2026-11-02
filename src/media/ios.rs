@@ -120,6 +120,8 @@ impl Player {
                     msg_send![class!(NSURL), fileURLWithPath: crate::ios::util::nsstring(path)]
                 }
                 Source::Url(url) => msg_send![class!(NSURL), URLWithString: crate::ios::util::nsstring(url)],
+                #[cfg(feature = "ffmpeg")]
+                Source::Ffmpeg(origin) => bail!("AVPlayer can't play {origin:?}; use an FFmpeg backend"),
             };
             if url.is_null() {
                 bail!("not a URL: {source:?}");

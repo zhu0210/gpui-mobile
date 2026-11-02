@@ -47,6 +47,8 @@ use linux::Decoder;
 mod ffmpeg;
 #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
 mod planes;
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+mod input;
 #[cfg(any(target_os = "android", all(feature = "ffmpeg", any(target_os = "ios", target_os = "linux"))))]
 mod player;
 
@@ -98,6 +100,39 @@ impl VideoFrames {
     /// size are zero until the stream is ready.
     pub fn open_url(url: &str) -> anyhow::Result<Self> {
         Self::open_source(Source::Url(url), Backend::Platform)
+    }
+
+    /// Plays bytes Rust supplies, through FFmpeg ([`Backend::Platform`] means
+    /// [`Backend::Ffmpeg`] here). `open` makes a fresh reader over the same
+    /// bytes, called once per playback thread (video, audio) and once to
+    /// probe. FFmpeg seeks it as it needs; `SeekFrom::End(0)` gives the size,
+    /// and a reader that can't answer that plays with the size unknown.
+    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+    pub fn open_reader(
+        open: impl Fn() -> std::io::Result<Box<dyn ReadSeek>> + Send + Sync + 'static,
+        backend: Backend,
+    ) -> anyhow::Result<Self> {
+        Self::open_source(Source::Ffmpeg(&input::Origin::Reader(Arc::new(open))), ffmpeg_backend(backend))
+    }
+
+    /// Plays an HLS stream whose every playlist, key and segment Rust fetches:
+    /// `fetch` gets each URI as FFmpeg's `hls` demuxer resolves it against
+    /// `playlist` and returns its bytes whole. AES-128 segments are decrypted
+    /// here. URIs must be relative or plain paths: FFmpeg has no network
+    /// protocols, so it refuses `http://` URIs before `fetch` sees them.
+    /// Each playback thread demuxes on its own, so `fetch` sees each segment
+    /// once per thread; cache in `fetch` to download it once.
+    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+    pub fn open_hls(
+        playlist: &str,
+        fetch: impl Fn(&str) -> std::io::Result<Vec<u8>> + Send + Sync + 'static,
+        backend: Backend,
+    ) -> anyhow::Result<Self> {
+        let origin = input::Origin::Hls {
+            playlist: playlist.to_owned(),
+            fetch: Arc::new(fetch),
+        };
+        Self::open_source(Source::Ffmpeg(&origin), ffmpeg_backend(backend))
     }
 
     fn open_source(source: Source, backend: Backend) -> anyhow::Result<Self> {
@@ -180,6 +215,18 @@ impl Drop for VideoFrames {
         #[cfg(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", target_os = "linux")))]
         gpui_wgpu::remove_external_texture(self.image.id);
     }
+}
+
+/// A byte source for [`VideoFrames::open_reader`].
+#[cfg(feature = "ffmpeg")]
+pub trait ReadSeek: std::io::Read + std::io::Seek + Send {}
+#[cfg(feature = "ffmpeg")]
+impl<T: std::io::Read + std::io::Seek + Send> ReadSeek for T {}
+
+/// Rust-supplied bytes play only through FFmpeg.
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+fn ffmpeg_backend(backend: Backend) -> Backend {
+    if backend == Backend::Platform { Backend::Ffmpeg } else { backend }
 }
 
 /// The largest rectangle with the aspect ratio of `content` centred in
@@ -266,6 +313,9 @@ fn yuv_to_rgb(bt709: bool, full_range: bool) -> [f32; 16] {
 )]
 enum Source<'a> {
     File(&'a Path),
+    /// A Rust reader or Rust-fed HLS, for the FFmpeg backends.
+    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+    Ffmpeg(&'a input::Origin),
     // The FFmpeg player, all Linux has, opens files only.
     #[cfg_attr(target_os = "linux", allow(dead_code))]
     Url(&'a str),

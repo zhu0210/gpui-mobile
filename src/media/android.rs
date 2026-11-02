@@ -124,24 +124,21 @@ impl Decoder {
     #[cfg(feature = "ffmpeg")]
     fn open_ffmpeg(source: Source, software: bool) -> Result<Self> {
         use super::ffmpeg::{probe, FfmpegAudio, FfmpegVideo};
-        let Source::File(path) = source else {
-            // Built without network: Cirrus will feed FFmpeg through its own IO.
-            bail!("the FFmpeg backend plays files only, not {source:?}");
-        };
-        let info = probe(path)?;
+        let origin = super::input::Origin::of(source)?;
+        let info = probe(&origin)?;
         let reader = Reader::new(info.width, info.height)?;
         let slot = Arc::new(Mutex::new(None));
         let window = if software { None } else { Some(reader.window()?) };
-        let (video, _hardware) = FfmpegVideo::open(path, window, slot.clone())?;
+        let (video, _hardware) = FfmpegVideo::open(&origin, window, slot.clone())?;
         let audio = if info.has_audio {
-            FfmpegAudio::open(path)
+            FfmpegAudio::open(&origin)
                 .map_err(|error| log::warn!("video: audio stream skipped: {error:#}"))
                 .ok()
         } else {
             None
         };
         log::info!(
-            "video: FFmpeg playing {}x{} (rotated {}°, audio {}) from {path:?}",
+            "video: FFmpeg playing {}x{} (rotated {}°, audio {}) from {origin:?}",
             info.width,
             info.height,
             info.rotation,
@@ -544,6 +541,8 @@ impl Track {
                 status(unsafe { ffi::AMediaExtractor_setDataSource(extractor.0.as_ptr(), url.as_ptr()) })
                     .with_context(|| format!("AMediaExtractor_setDataSource {url:?}"))?;
             }
+            #[cfg(feature = "ffmpeg")]
+            Source::Ffmpeg(origin) => bail!("the platform decoder can't play {origin:?}; use an FFmpeg backend"),
         }
         // SAFETY: the extractor is live; formats are owned by `Format`.
         unsafe {
