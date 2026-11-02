@@ -1600,7 +1600,7 @@ impl PlatformWindow for AndroidPlatformWindow {
     fn text_input_state_changed(&self, change: gpui::TextInputStateChange) {
         match change {
             gpui::TextInputStateChange::FocusGained => {
-                super::jni::show_keyboard_android(crate::KeyboardType::Default);
+                super::jni::show_keyboard_android(crate::focused_keyboard());
             }
             gpui::TextInputStateChange::FocusLost => super::jni::hide_keyboard_android(),
             _ => {}

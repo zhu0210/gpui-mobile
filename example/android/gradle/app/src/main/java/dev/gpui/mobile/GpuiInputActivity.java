@@ -8,7 +8,9 @@ import android.text.InputType;
 import android.text.Selection;
 import android.text.TextWatcher;
 import android.view.KeyEvent;
+import android.view.View;
 import android.view.ViewGroup;
+import android.view.autofill.AutofillManager;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -48,13 +50,24 @@ public class GpuiInputActivity extends NativeActivity {
                 case 3: type = InputType.TYPE_CLASS_NUMBER; break;
                 case 4: type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI; break;
                 case 5: type = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL; break;
+                case 6: type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD; break;
+                case 7: type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS; break;
             }
             input.setInputType(type);
+            // Password managers fill through autofill: only the sign-in fields take part.
+            boolean credential = keyboardType == 6 || keyboardType == 7;
+            input.setAutofillHints(keyboardType == 6 ? View.AUTOFILL_HINT_PASSWORD
+                    : keyboardType == 7 ? View.AUTOFILL_HINT_USERNAME : null);
+            input.setImportantForAutofill(credential ? View.IMPORTANT_FOR_AUTOFILL_YES
+                    : View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
             input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
             input.requestFocus();
             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
             imm.restartInput(input);
             imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+            // The proxy keeps focus from one field to the next, so autofill must be asked.
+            AutofillManager autofill = getSystemService(AutofillManager.class);
+            if (credential && autofill != null) autofill.requestAutofill(input);
         });
     }
 
