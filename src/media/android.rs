@@ -3,9 +3,9 @@
 //! of each video frame on the main thread.
 //!
 //! Video and audio run on their own threads, each with its own extractor, and
-//! follow one clock ([`State`]): the audio stream's presentation timestamps
-//! when the file has audio, the monotonic clock otherwise. The video thread
-//! renders each frame into the reader once the clock reaches its timestamp.
+//! follow one clock ([`super::player`]). The video thread renders each frame
+//! into the reader once the clock reaches it; the audio thread writes to
+//! AAudio, whose timestamps drive the clock.
 //!
 //! The import (ported from lumina-video's `android_import.rs`) wraps the
 //! frame's `AHardwareBuffer` in a `VkImage` with the buffer's external format
@@ -22,9 +22,12 @@ use ndk_sys as ffi;
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, CStr, CString};
 use std::os::fd::AsRawFd;
+use super::player::{monotonic_ns, play_video, Shared, VideoOutput, VideoSource, POLL};
 use super::Source;
 use std::ptr::{self, NonNull};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
+#[cfg(feature = "ffmpeg")]
+use std::sync::{Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -32,12 +35,8 @@ use std::time::{Duration, Instant};
 /// and one in flight on the GPU.
 const MAX_IMAGES: i32 = 4;
 const DEQUEUE_TIMEOUT_US: i64 = 10_000;
-/// Video frames later than this are dropped instead of rendered.
-const LATE_US: i64 = 50_000;
 /// How long a seek waits for the audio stream's first timestamp.
 const HOLD_TIMEOUT: Duration = Duration::from_millis(500);
-/// How long the playback threads wait before looking at the state again.
-const POLL: Duration = Duration::from_millis(20);
 /// Imported frames per drift report in the log.
 const DRIFT_REPORT_FRAMES: u32 = 300;
 /// `MediaFormat.KEY_ROTATION`, spelled out: the NDK constant needs API 28.
@@ -59,7 +58,7 @@ pub(super) struct Decoder {
     drift: Cell<Drift>,
     /// Software-decoded frames waiting for upload (FFmpeg's fallback).
     #[cfg(feature = "ffmpeg")]
-    software: Option<Arc<Mutex<Option<super::planes::SoftwareFrame>>>>,
+    software: Option<Arc<Mutex<Option<super::planes::Picture>>>>,
     #[cfg(feature = "ffmpeg")]
     uploader: RefCell<super::planes::Uploader>,
 }
@@ -175,16 +174,7 @@ impl Decoder {
         mut video: V,
         audio: Option<Box<dyn AudioSource + Send>>,
     ) -> Result<Self> {
-        let mut state = State {
-            playing: true,
-            audio: audio.is_some(),
-            ..State::default()
-        };
-        state.seek(0);
-        let shared = Arc::new(Shared {
-            state: Mutex::new(state),
-            changed: Condvar::new(),
-        });
+        let shared = Shared::new(audio.is_some());
         let mut threads = vec![std::thread::Builder::new()
             .name("gpui-video".into())
             .spawn({
@@ -242,34 +232,27 @@ impl Decoder {
     }
 
     pub fn play(&self) {
-        self.shared.update(|state| {
-            if state.ended {
-                state.seek(0);
-            }
-            state.playing = true;
-        });
+        self.shared.play()
     }
 
     pub fn pause(&self) {
-        self.shared.update(|state| state.playing = false);
+        self.shared.pause()
     }
 
     pub fn is_paused(&self) -> bool {
-        !self.shared.lock().playing
+        self.shared.is_paused()
     }
 
     pub fn seek(&self, position: Duration) {
-        let target = (position.as_micros() as i64).clamp(0, self.duration_us);
-        self.shared.update(|state| state.seek(target));
+        self.shared.seek((position.as_micros() as i64).clamp(0, self.duration_us))
     }
 
     pub fn set_looping(&self, looping: bool) {
-        self.shared.update(|state| state.looping = looping);
+        self.shared.set_looping(looping)
     }
 
     pub fn position(&self) -> Duration {
-        let position = self.shared.lock().position_at(monotonic_ns());
-        Duration::from_micros(position.clamp(0, self.duration_us) as u64)
+        Duration::from_micros(self.shared.position_us().clamp(0, self.duration_us) as u64)
     }
 
     pub fn duration(&self) -> Duration {
@@ -277,19 +260,11 @@ impl Decoder {
     }
 
     pub fn ended(&self) -> bool {
-        self.shared.lock().ended
+        self.shared.ended()
     }
 
-    /// Whether new frames may still arrive without anything else changing:
-    /// while playing, during a seek, or shortly after the last import.
     pub fn is_active(&self) -> bool {
-        let state = self.shared.lock();
-        (state.playing && !state.ended)
-            || state.holding
-            || self
-                .last_import
-                .get()
-                .is_some_and(|time| time.elapsed() < Duration::from_millis(500))
+        self.shared.is_active(self.last_import.get())
     }
 
     /// Imports the newest decoded image, if there is one, and makes it the
@@ -338,7 +313,7 @@ impl Decoder {
     /// Uploads a software-decoded frame and makes it the texture drawn for
     /// `image_id`.
     #[cfg(feature = "ffmpeg")]
-    fn upload(&self, image_id: ImageId, frame: &super::planes::SoftwareFrame) -> Result<()> {
+    fn upload(&self, image_id: ImageId, frame: &super::planes::Picture) -> Result<()> {
         let platform =
             crate::android::jni::platform().ok_or_else(|| anyhow!("platform not initialised"))?;
         let context = platform.gpu_context();
@@ -399,182 +374,6 @@ impl Drop for Decoder {
     }
 }
 
-fn monotonic_ns() -> i64 {
-    let mut time = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: writes into local storage.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
-    time.tv_sec * 1_000_000_000 + time.tv_nsec
-}
-
-/// Playback state shared by the UI, video and audio threads.
-struct Shared {
-    state: Mutex<State>,
-    changed: Condvar,
-}
-
-#[derive(Default)]
-struct State {
-    playing: bool,
-    looping: bool,
-    stop: bool,
-    ended: bool,
-    /// Whether the audio thread is playing and owns the clock.
-    audio: bool,
-    /// Set by a seek until its first output; the clock stands at the target.
-    holding: bool,
-    seek_generation: u64,
-    seek_target_us: i64,
-    /// The clock: media time `anchor_us` at monotonic time `anchor_ns`,
-    /// advancing while `running`.
-    anchor_us: i64,
-    anchor_ns: i64,
-    running: bool,
-    /// When the clock last started; audio timestamps from before are stale.
-    started_ns: i64,
-    /// Where each track's output ended, once it has, since the last seek.
-    video_end_us: Option<i64>,
-    audio_end_us: Option<i64>,
-}
-
-impl State {
-    fn should_run(&self) -> bool {
-        self.wants_sound() && !self.holding
-    }
-
-    /// Whether the audio stream should play: also while holding after a seek,
-    /// so that its first timestamp can start the clock.
-    fn wants_sound(&self) -> bool {
-        self.playing && !self.ended && crate::android::jni::app_visible()
-    }
-
-    fn position_at(&self, now_ns: i64) -> i64 {
-        if self.running {
-            self.anchor_us + (now_ns - self.anchor_ns) / 1000
-        } else {
-            self.anchor_us
-        }
-    }
-
-    /// Starts or stops the clock when `should_run` changed: play, pause,
-    /// seek, end, or the app going to or coming back from the background.
-    fn settle(&mut self) {
-        let run = self.should_run();
-        if run != self.running {
-            let now = monotonic_ns();
-            self.anchor_us = self.position_at(now);
-            self.anchor_ns = now;
-            self.running = run;
-            if run {
-                self.started_ns = now;
-            }
-        }
-    }
-
-    fn seek(&mut self, target_us: i64) {
-        self.seek_generation += 1;
-        self.seek_target_us = target_us;
-        self.anchor_us = target_us;
-        self.anchor_ns = monotonic_ns();
-        self.running = false;
-        self.holding = true;
-        self.ended = false;
-        self.video_end_us = None;
-        self.audio_end_us = None;
-    }
-}
-
-impl Shared {
-    /// The state, with the clock settled.
-    fn lock(&self) -> MutexGuard<'_, State> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.settle();
-        state
-    }
-
-    fn update(&self, change: impl FnOnce(&mut State)) {
-        let mut state = self.lock();
-        change(&mut state);
-        state.settle();
-        drop(state);
-        self.changed.notify_all();
-    }
-
-    /// Waits for a change or `timeout`, then returns the settled state.
-    fn wait<'a>(&self, state: MutexGuard<'a, State>, timeout: Duration) -> MutexGuard<'a, State> {
-        let (mut state, _) = self
-            .changed
-            .wait_timeout(state, timeout)
-            .unwrap_or_else(PoisonError::into_inner);
-        state.settle();
-        state
-    }
-
-    /// Moves the clock to the audio stream's timestamp: `media_us` was heard
-    /// at `time_ns`.
-    /// The first one after a seek ends the hold and starts the clock there.
-    fn sync(&self, generation: u64, media_us: i64, time_ns: i64) {
-        let mut state = self.lock();
-        if state.seek_generation != generation {
-            return;
-        }
-        if state.holding {
-            state.holding = false;
-            state.settle();
-        } else if !state.running || time_ns <= state.started_ns {
-            return;
-        }
-        state.anchor_us = media_us;
-        state.anchor_ns = time_ns;
-        drop(state);
-        self.changed.notify_all();
-    }
-
-    /// Waits until the clock reaches `pts`; returns how late that is, or
-    /// `None` when a seek or stop came first.
-    fn wait_until(&self, generation: u64, pts: i64) -> Option<i64> {
-        let mut state = self.lock();
-        loop {
-            if state.stop || state.seek_generation != generation {
-                return None;
-            }
-            let position = state.position_at(monotonic_ns());
-            if position >= pts {
-                return Some(position - pts);
-            }
-            let wait = if state.running {
-                Duration::from_micros((pts - position) as u64).min(POLL)
-            } else {
-                POLL
-            };
-            state = self.wait(state, wait);
-        }
-    }
-}
-
-/// What a video source produced.
-pub(super) enum VideoOutput<F> {
-    /// Nothing yet; try again.
-    Pending,
-    End,
-    /// A frame and its presentation time.
-    Frame(i64, F),
-}
-
-/// A video decoder the playback loop drives: `AMediaCodec`, or FFmpeg.
-pub(super) trait VideoSource {
-    type Frame;
-    /// Moves to the sync sample at or before `target_us`, dropping what the
-    /// decoder holds.
-    fn seek(&mut self, target_us: i64) -> Result<()>;
-    fn next(&mut self) -> Result<VideoOutput<Self::Frame>>;
-    /// Hands the frame back, shown (rendered into the reader, or queued for
-    /// upload) when `render`.
-    fn release(&mut self, frame: Self::Frame, render: bool) -> Result<()>;
-}
-
 /// What an audio source produced.
 pub(super) enum AudioOutput {
     Pending,
@@ -592,76 +391,6 @@ pub(super) trait AudioSource {
     fn next(&mut self) -> Result<AudioOutput>;
     /// Gives back the samples of the last `Samples` output.
     fn release(&mut self) -> Result<()>;
-}
-
-/// Decodes video and renders each frame into the reader when the clock
-/// reaches it; drops late frames and, after a seek, those before the target.
-fn play_video<S: VideoSource>(source: &mut S, shared: &Shared) -> Result<()> {
-    let (mut generation, mut target, mut first, mut last_us) = (0, 0, false, 0);
-    loop {
-        let mut state = shared.lock();
-        if state.stop {
-            return Ok(());
-        }
-        if state.seek_generation != generation {
-            generation = state.seek_generation;
-            target = state.seek_target_us;
-            drop(state);
-            source.seek(target)?;
-            first = true;
-            continue;
-        }
-        if let Some(video_end) = state.video_end_us {
-            // Ends (or loops) once both tracks ran out and the clock passed them.
-            let audio_end = if state.audio { state.audio_end_us } else { Some(video_end) };
-            if let Some(audio_end) = audio_end {
-                if !state.ended && state.position_at(monotonic_ns()) >= video_end.max(audio_end) {
-                    if state.looping {
-                        state.seek(0);
-                    } else {
-                        state.ended = true;
-                    }
-                    state.settle();
-                    drop(state);
-                    shared.changed.notify_all();
-                    continue;
-                }
-            }
-            drop(shared.wait(state, POLL));
-            continue;
-        }
-        drop(state);
-
-        let (pts, frame) = match source.next()? {
-            VideoOutput::Pending => continue,
-            VideoOutput::End => {
-                shared.update(|state| {
-                    if state.seek_generation == generation {
-                        state.video_end_us = Some(last_us.max(target));
-                        state.holding &= state.audio;
-                    }
-                });
-                continue;
-            }
-            VideoOutput::Frame(pts, frame) => (pts, frame),
-        };
-        last_us = pts;
-        let render = if pts < target {
-            false
-        } else if first {
-            // The first frame after a seek shows at once, even when paused.
-            first = false;
-            shared.update(|state| {
-                if state.seek_generation == generation && !state.audio {
-                    state.holding = false;
-                }
-            });
-            true
-        } else {
-            shared.wait_until(generation, pts).is_some_and(|late| late <= LATE_US)
-        };
-        source.release(frame, render)?;
-    }
 }
 
 /// Decodes audio and writes it to an AAudio stream, which paces the thread;

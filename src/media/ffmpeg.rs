@@ -1,25 +1,37 @@
-//! FFmpeg as a playback source on Android: FFmpeg demuxes, and video decodes
-//! through FFmpeg's MediaCodec decoders (`h264_mediacodec`, …) straight into
-//! the same `AImageReader` as the platform source, so frames reach the GPU
-//! through the same AHardwareBuffer import. When MediaCodec can't take the
-//! stream, FFmpeg decodes in software and the planes are uploaded and converted
-//! on the GPU ([`super::planes`]). Audio decodes in software into the AAudio
-//! stream.
+//! FFmpeg as a playback source: FFmpeg demuxes, and video decodes through the
+//! platform decoder:
+//!
+//! - Android: FFmpeg's MediaCodec decoders (`h264_mediacodec`, …) render
+//!   straight into the same `AImageReader` as the platform source, so frames
+//!   reach the GPU through the same AHardwareBuffer import. Audio decodes in
+//!   software into the AAudio stream.
+//! - iOS: FFmpeg's VideoToolbox hwaccel hands out BGRA pixel buffers, which
+//!   take the same Metal import as `AVPlayer`'s frames.
+//!
+//! When the platform decoder can't take the stream, FFmpeg decodes in
+//! software and the planes are uploaded and converted on the GPU
+//! ([`super::planes`]).
 //!
 //! Each playback thread opens the file itself, like the platform source's
 //! extractors, so the threads share nothing but the clock.
 
-use super::android::{AudioOutput, AudioSource, VideoOutput, VideoSource};
-use super::planes::SoftwareFrame;
+#[cfg(target_os = "android")]
+use super::android::{AudioOutput, AudioSource};
+use super::player::{VideoOutput, VideoSource};
+use super::planes::Picture;
 use anyhow::{anyhow, bail, Context as _, Result};
 use ffmpeg_next as ffmpeg;
 use ffmpeg::ffi;
-use ffmpeg::format::{context::Input, Pixel, Sample};
+use ffmpeg::format::{context::Input, Pixel};
+#[cfg(target_os = "android")]
+use ffmpeg::format::Sample;
+#[cfg(target_os = "android")]
 use ndk_sys::ANativeWindow;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Once, PoisonError};
 
 // `libavcodec/mediacodec.h`, which ffmpeg-sys-next doesn't bind.
+#[cfg(target_os = "android")]
 extern "C" {
     fn av_mediacodec_release_buffer(buffer: *mut std::ffi::c_void, render: std::ffi::c_int) -> std::ffi::c_int;
 }
@@ -180,11 +192,21 @@ impl Demuxer {
     }
 }
 
-/// A frame FFmpeg decoded: a MediaCodec output buffer, which renders into the
-/// reader, or a software frame.
+/// Where the platform decoder puts its frames: the reader's window on
+/// Android; VideoToolbox needs nothing.
+#[cfg(target_os = "android")]
+pub(super) type HardwareTarget = *mut ANativeWindow;
+#[cfg(target_os = "ios")]
+pub(super) type HardwareTarget = ();
+
+/// A frame FFmpeg decoded.
 pub(super) enum Frame {
-    Hardware(ffmpeg::frame::Video),
-    Software(ffmpeg::frame::Video),
+    /// A MediaCodec output buffer, which renders into the reader.
+    #[cfg(target_os = "android")]
+    MediaCodec(ffmpeg::frame::Video),
+    /// A frame for the main thread: 8-bit 4:2:0 planes, or on iOS a
+    /// VideoToolbox pixel buffer.
+    Picture(ffmpeg::frame::Video),
 }
 
 pub(super) struct FfmpegVideo {
@@ -192,8 +214,8 @@ pub(super) struct FfmpegVideo {
     decoder: ffmpeg::decoder::Video,
     /// Converts software frames that aren't 8-bit 4:2:0 to `yuv420p`.
     scaler: Option<ffmpeg::software::scaling::Context>,
-    /// Where software frames go to be uploaded on the main thread.
-    slot: Arc<Mutex<Option<SoftwareFrame>>>,
+    /// Where pictures go to be imported on the main thread.
+    slot: Arc<Mutex<Option<Picture>>>,
 }
 
 // SAFETY: the source moves to its playback thread and is only used there; the
@@ -201,20 +223,20 @@ pub(super) struct FfmpegVideo {
 unsafe impl Send for FfmpegVideo {}
 
 impl FfmpegVideo {
-    /// Opens the video stream, decoding with MediaCodec into `window` when it
-    /// is given and MediaCodec takes the stream, in software otherwise.
-    /// Returns the source and whether it decodes in hardware.
+    /// Opens the video stream, decoding with the platform decoder when
+    /// `hardware` is given and the decoder takes the stream, in software
+    /// otherwise. Returns the source and whether it decodes in hardware.
     pub fn open(
         path: &Path,
-        window: Option<*mut ANativeWindow>,
-        slot: Arc<Mutex<Option<SoftwareFrame>>>,
+        hardware: Option<HardwareTarget>,
+        slot: Arc<Mutex<Option<Picture>>>,
     ) -> Result<(Self, bool)> {
         let (demuxer, parameters) = Demuxer::open(path, ffmpeg::media::Type::Video)?;
-        let hardware = match window {
-            Some(window) => match open_mediacodec(&parameters, demuxer.time_base, window) {
+        let hardware = match hardware {
+            Some(target) => match open_hardware(&parameters, demuxer.time_base, target) {
                 Ok(decoder) => Some(decoder),
                 Err(error) => {
-                    log::warn!("video: FFmpeg MediaCodec unavailable, decoding in software: {error:#}");
+                    log::warn!("video: FFmpeg hardware decoding unavailable, decoding in software: {error:#}");
                     None
                 }
             },
@@ -230,7 +252,11 @@ impl FfmpegVideo {
             // SAFETY: the input's format is set once it is open.
             unsafe { std::ffi::CStr::from_ptr((*(*demuxer.input.as_ptr()).iformat).name) }.to_string_lossy(),
             decoder.codec().map_or_else(|| "?".into(), |codec| codec.name().to_owned()),
-            if is_hardware { "MediaCodec into the AImageReader" } else { "software, planes uploaded" },
+            match is_hardware {
+                true if cfg!(target_os = "android") => "MediaCodec into the AImageReader",
+                true => "VideoToolbox into BGRA pixel buffers",
+                false => "software, planes uploaded",
+            },
         );
         Ok((
             Self {
@@ -274,7 +300,8 @@ impl FfmpegVideo {
 }
 
 /// Opens FFmpeg's MediaCodec decoder for the stream, rendering into `window`.
-fn open_mediacodec(
+#[cfg(target_os = "android")]
+fn open_hardware(
     parameters: &ffmpeg::codec::Parameters,
     time_base: ffmpeg::Rational,
     window: *mut ANativeWindow,
@@ -318,6 +345,7 @@ fn open_mediacodec(
     Ok(context.decoder().open_as_with(codec, options)?.video()?)
 }
 
+#[cfg(target_os = "android")]
 extern "C" fn pick_mediacodec(
     _context: *mut ffi::AVCodecContext,
     mut formats: *const ffi::AVPixelFormat,
@@ -332,6 +360,77 @@ extern "C" fn pick_mediacodec(
         }
     }
     ffi::AVPixelFormat::AV_PIX_FMT_NONE
+}
+
+/// Opens the native decoder with FFmpeg's VideoToolbox hwaccel.
+#[cfg(target_os = "ios")]
+fn open_hardware(
+    parameters: &ffmpeg::codec::Parameters,
+    time_base: ffmpeg::Rational,
+    _target: HardwareTarget,
+) -> Result<ffmpeg::decoder::Video> {
+    let mut context = ffmpeg::codec::Context::from_parameters(parameters.clone())?;
+    // SAFETY: the context is not open yet and takes the device reference.
+    unsafe {
+        let raw = context.as_mut_ptr();
+        (*raw).pkt_timebase = time_base.into();
+        let mut device = std::ptr::null_mut();
+        let ret = ffi::av_hwdevice_ctx_create(
+            &mut device,
+            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            0,
+        );
+        if ret < 0 {
+            bail!("av_hwdevice_ctx_create(VIDEOTOOLBOX): {}", ffmpeg::Error::from(ret));
+        }
+        (*raw).hw_device_ctx = device;
+        (*raw).get_format = Some(pick_videotoolbox);
+    }
+    Ok(context.decoder().video()?)
+}
+
+/// Picks VideoToolbox, with BGRA frames so they take the same Metal import as
+/// `AVPlayer`'s (VideoToolbox converts on the GPU); software when that fails.
+#[cfg(target_os = "ios")]
+extern "C" fn pick_videotoolbox(
+    context: *mut ffi::AVCodecContext,
+    formats: *const ffi::AVPixelFormat,
+) -> ffi::AVPixelFormat {
+    // SAFETY: FFmpeg passes its open context and a list ending in
+    // AV_PIX_FMT_NONE; the frames context replaces the context's own.
+    unsafe {
+        let mut format = formats;
+        while *format != ffi::AVPixelFormat::AV_PIX_FMT_NONE {
+            if *format == ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX {
+                let mut frames = std::ptr::null_mut();
+                if ffi::avcodec_get_hw_frames_parameters(context, (*context).hw_device_ctx, *format, &mut frames) >= 0 {
+                    (*((*frames).data as *mut ffi::AVHWFramesContext)).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_BGRA;
+                    if ffi::av_hwframe_ctx_init(frames) >= 0 {
+                        ffi::av_buffer_unref(&mut (*context).hw_frames_ctx);
+                        (*context).hw_frames_ctx = frames;
+                        return *format;
+                    }
+                    ffi::av_buffer_unref(&mut frames);
+                }
+                log::warn!("video: VideoToolbox BGRA frames unavailable, decoding in software");
+                break;
+            }
+            format = format.add(1);
+        }
+        // Not `avcodec_default_get_format`: with the device set it picks
+        // VideoToolbox again.
+        let mut format = formats;
+        while *format != ffi::AVPixelFormat::AV_PIX_FMT_NONE {
+            let descriptor = ffi::av_pix_fmt_desc_get(*format);
+            if !descriptor.is_null() && (*descriptor).flags & ffi::AV_PIX_FMT_FLAG_HWACCEL as u64 == 0 {
+                return *format;
+            }
+            format = format.add(1);
+        }
+        ffi::AVPixelFormat::AV_PIX_FMT_NONE
+    }
 }
 
 fn open_software(parameters: &ffmpeg::codec::Parameters, time_base: ffmpeg::Rational) -> Result<ffmpeg::decoder::Video> {
@@ -357,10 +456,12 @@ impl VideoSource for FfmpegVideo {
         match self.decoder.receive_frame(&mut frame) {
             Ok(()) => {
                 let pts = self.demuxer.micros(frame.timestamp());
-                let frame = if frame.format() == Pixel::MEDIACODEC {
-                    Frame::Hardware(frame)
-                } else {
-                    Frame::Software(self.yuv420p(frame)?)
+                let frame = match frame.format() {
+                    #[cfg(target_os = "android")]
+                    Pixel::MEDIACODEC => Frame::MediaCodec(frame),
+                    #[cfg(target_os = "ios")]
+                    Pixel::VIDEOTOOLBOX => Frame::Picture(frame),
+                    _ => Frame::Picture(self.yuv420p(frame)?),
                 };
                 Ok(VideoOutput::Frame(pts, frame))
             }
@@ -375,7 +476,8 @@ impl VideoSource for FfmpegVideo {
 
     fn release(&mut self, frame: Frame, render: bool) -> Result<()> {
         match frame {
-            Frame::Hardware(frame) => {
+            #[cfg(target_os = "android")]
+            Frame::MediaCodec(frame) => {
                 // SAFETY: a MEDIACODEC frame's data[3] is its codec buffer,
                 // released once here (dropping the frame then does nothing).
                 let ret = unsafe {
@@ -385,17 +487,17 @@ impl VideoSource for FfmpegVideo {
                     bail!("av_mediacodec_release_buffer: {}", ffmpeg::Error::from(ret));
                 }
             }
-            Frame::Software(frame) if render => {
+            Frame::Picture(frame) if render => {
                 let pts = self.demuxer.micros(frame.timestamp());
-                *self.slot.lock().unwrap_or_else(PoisonError::into_inner) =
-                    Some(SoftwareFrame::new(frame, pts));
+                *self.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Picture::new(frame, pts));
             }
-            Frame::Software(_) => {}
+            Frame::Picture(_) => {}
         }
         Ok(())
     }
 }
 
+#[cfg(target_os = "android")]
 pub(super) struct FfmpegAudio {
     demuxer: Demuxer,
     decoder: ffmpeg::decoder::Audio,
@@ -405,8 +507,10 @@ pub(super) struct FfmpegAudio {
 }
 
 // SAFETY: the source moves to its playback thread and is only used there.
+#[cfg(target_os = "android")]
 unsafe impl Send for FfmpegAudio {}
 
+#[cfg(target_os = "android")]
 impl FfmpegAudio {
     pub fn open(path: &Path) -> Result<Self> {
         let (demuxer, parameters) = Demuxer::open(path, ffmpeg::media::Type::Audio)?;
@@ -434,6 +538,7 @@ impl FfmpegAudio {
     }
 }
 
+#[cfg(target_os = "android")]
 impl AudioSource for FfmpegAudio {
     fn format(&self) -> Result<(i32, i32)> {
         Ok((self.decoder.rate() as i32, self.output_channels()))

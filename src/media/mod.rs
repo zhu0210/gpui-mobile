@@ -18,11 +18,13 @@
 //! - iOS: `AVPlayer` plays the file; an `AVPlayerItemVideoOutput` hands out
 //!   IOSurface-backed BGRA pixel buffers, wrapped as Metal textures through
 //!   `CVMetalTextureCache`.
-//! - FFmpeg ([`Backend::Ffmpeg`], feature `ffmpeg`, Android for now): FFmpeg
-//!   demuxes; video decodes through FFmpeg's MediaCodec decoders into the same
-//!   reader and import, or in software with the planes uploaded and converted
-//!   on the GPU ([`Backend::FfmpegSoftware`] forces that); audio decodes in
-//!   software into AAudio.
+//! - FFmpeg ([`Backend::Ffmpeg`], feature `ffmpeg`): FFmpeg demuxes; video
+//!   decodes in hardware, or in software with the planes uploaded and
+//!   converted on the GPU ([`Backend::FfmpegSoftware`] forces that).
+//!   - Android: through FFmpeg's MediaCodec decoders into the same reader and
+//!     import; audio decodes in software into AAudio.
+//!   - iOS: through VideoToolbox into BGRA pixel buffers, taking the same
+//!     Metal import as `AVPlayer`'s; no sound yet.
 //!
 //! Feature-gated behind `media`.
 
@@ -34,10 +36,12 @@ use android::Decoder;
 mod ios;
 #[cfg(target_os = "ios")]
 use ios::Decoder;
-#[cfg(all(feature = "ffmpeg", target_os = "android"))]
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios")))]
 mod ffmpeg;
-#[cfg(all(feature = "ffmpeg", target_os = "android"))]
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios")))]
 mod planes;
+#[cfg(any(target_os = "android", all(feature = "ffmpeg", target_os = "ios")))]
+mod player;
 
 use gpui::{px, size, Bounds, Corners, DevicePixels, Pixels, RenderImage, Size, Window};
 use std::path::Path;
@@ -90,14 +94,7 @@ impl VideoFrames {
     }
 
     fn open_source(source: Source, backend: Backend) -> anyhow::Result<Self> {
-        #[cfg(target_os = "android")]
         let inner = Decoder::open(source, backend)?;
-        #[cfg(not(target_os = "android"))]
-        let inner = match backend {
-            Backend::Platform => Decoder::open(source)?,
-            #[allow(unreachable_patterns)]
-            _ => anyhow::bail!("{backend:?} is not implemented on this platform yet"),
-        };
         // Drawn by the atlas only while no frame is registered (before the
         // first frame, or after a device loss until the next one).
         let placeholder = image::Frame::new(image::RgbaImage::new(1, 1));
@@ -193,7 +190,7 @@ fn contain(bounds: Bounds<Pixels>, content: Size<DevicePixels>) -> Bounds<Pixels
 /// one, to normalised buffer coordinates, so the output shows the `crop`
 /// rectangle (x, y, width, height) of a `buffer`-sized image turned clockwise
 /// by `rotation` degrees.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "android", all(feature = "ffmpeg", target_os = "ios"))), allow(dead_code))]
 fn uv_mapping(crop: (i32, i32, u32, u32), buffer: (u32, u32), rotation: i32) -> [f32; 8] {
     // Crop-relative source coordinates (s, t) = (a·u + b·v + c, d·u + e·v + f).
     let [a, b, c, d, e, f] = match rotation {
@@ -219,7 +216,7 @@ fn uv_mapping(crop: (i32, i32, u32, u32), buffer: (u32, u32), rotation: i32) -> 
 /// The YCbCr → RGB conversion for 8-bit video, as the planes shader takes
 /// it: (Y offset, Y scale, chroma offset, chroma scale), then the R, G and B
 /// rows applied to (Y, Cb, Cr, 0). BT.709 or BT.601, limited or full range.
-#[cfg_attr(not(all(feature = "ffmpeg", target_os = "android")), allow(dead_code))]
+#[cfg_attr(not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios"))), allow(dead_code))]
 fn yuv_to_rgb(bt709: bool, full_range: bool) -> [f32; 16] {
     let (kr, kb) = if bt709 { (0.2126, 0.0722) } else { (0.299, 0.114) };
     let kg = 1.0 - kr - kb;
@@ -264,7 +261,7 @@ enum Decoder {}
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[allow(clippy::unused_self)]
 impl Decoder {
-    fn open(_source: Source) -> anyhow::Result<Self> {
+    fn open(_source: Source, _backend: Backend) -> anyhow::Result<Self> {
         anyhow::bail!("video frames are only implemented on Android and iOS")
     }
     fn video_size(&self) -> Size<DevicePixels> {

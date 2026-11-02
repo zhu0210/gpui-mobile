@@ -171,12 +171,11 @@ pub fn render(_cx: &App) -> AnyElement {
             div()
                 .text_sm()
                 .text_color(rgb(SUBTEXT))
-                .child(if cfg!(target_os = "ios") {
-                    "Played by AVPlayer, each frame an IOSurface wrapped as a Metal texture and drawn as a GPUI image. No CPU copies."
-                } else if BACKENDS[backend].1 == Backend::Platform {
-                    "Decoded by MediaCodec into an AHardwareBuffer, imported into Vulkan and drawn as a GPUI image, paced by the AAudio clock. No CPU copies."
-                } else {
-                    "Demuxed by FFmpeg. Video through FFmpeg's MediaCodec decoder into the same AHardwareBuffer import, or decoded in software with the planes converted on the GPU; audio decoded by FFmpeg into AAudio."
+                .child(match (cfg!(target_os = "ios"), BACKENDS[backend].1 == Backend::Platform) {
+                    (true, true) => "Played by AVPlayer, each frame an IOSurface wrapped as a Metal texture and drawn as a GPUI image. No CPU copies.",
+                    (true, false) => "Demuxed by FFmpeg. Video through VideoToolbox into BGRA IOSurfaces, the same Metal import as AVPlayer's, or decoded in software with the planes converted on the GPU. No sound yet.",
+                    (false, true) => "Decoded by MediaCodec into an AHardwareBuffer, imported into Vulkan and drawn as a GPUI image, paced by the AAudio clock. No CPU copies.",
+                    (false, false) => "Demuxed by FFmpeg. Video through FFmpeg's MediaCodec decoder into the same AHardwareBuffer import, or decoded in software with the planes converted on the GPU; audio decoded by FFmpeg into AAudio.",
                 }),
         )
         .child(div().flex().flex_wrap().gap_2().children(clip_buttons))

@@ -4,6 +4,10 @@
 //! `MTLTexture` and wgpu takes over through `texture_from_raw`. The decoder
 //! and the conversion to BGRA run in VideoToolbox on the GPU; no pixels pass
 //! through the CPU.
+//!
+//! With the `ffmpeg` feature, [`FfmpegPlayer`] plays files through FFmpeg
+//! instead: VideoToolbox decodes into BGRA pixel buffers that take the same
+//! import, on the shared playback loop ([`super::player`]).
 
 use anyhow::{anyhow, bail, Result};
 use gpui::{DevicePixels, ImageId, Size};
@@ -15,9 +19,17 @@ use objc2::{class, msg_send};
 use objc2_metal::{MTLTexture, MTLTextureType};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
-use super::Source;
+use super::{Backend, Source};
 use std::ptr;
 use std::time::{Duration, Instant};
+#[cfg(feature = "ffmpeg")]
+use super::planes::{Picture, Uploader};
+#[cfg(feature = "ffmpeg")]
+use super::player::{play_video, Shared};
+#[cfg(feature = "ffmpeg")]
+use std::sync::{Arc, Mutex, PoisonError};
+#[cfg(feature = "ffmpeg")]
+use std::thread::JoinHandle;
 
 /// `kCVPixelFormatType_32BGRA`.
 const PIXEL_FORMAT_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
@@ -31,7 +43,56 @@ const ITEM_READY: isize = 1;
 /// `AVPlayerItemStatusFailed`.
 const ITEM_FAILED: isize = 2;
 
-pub(super) struct Decoder {
+/// What plays the file.
+pub(super) enum Decoder {
+    Player(Player),
+    #[cfg(feature = "ffmpeg")]
+    Ffmpeg(Box<FfmpegPlayer>),
+}
+
+impl Decoder {
+    pub fn open(source: Source, backend: Backend) -> Result<Self> {
+        Ok(match backend {
+            Backend::Platform => Self::Player(Player::open(source)?),
+            #[cfg(feature = "ffmpeg")]
+            Backend::Ffmpeg => Self::Ffmpeg(Box::new(FfmpegPlayer::open(source, false)?)),
+            #[cfg(feature = "ffmpeg")]
+            Backend::FfmpegSoftware => Self::Ffmpeg(Box::new(FfmpegPlayer::open(source, true)?)),
+        })
+    }
+}
+
+macro_rules! forward {
+    ($($name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?;)*) => {
+        impl Decoder {
+            $(pub fn $name(&self $(, $arg: $ty)*) $(-> $ret)? {
+                match self {
+                    Self::Player(player) => player.$name($($arg),*),
+                    #[cfg(feature = "ffmpeg")]
+                    Self::Ffmpeg(player) => player.$name($($arg),*),
+                }
+            })*
+        }
+    };
+}
+
+forward! {
+    video_size() -> Size<DevicePixels>;
+    frames_shown() -> u64;
+    play();
+    pause();
+    is_paused() -> bool;
+    seek(position: Duration);
+    set_looping(looping: bool);
+    position() -> Duration;
+    duration() -> Duration;
+    ended() -> bool;
+    is_active() -> bool;
+    update(image_id: ImageId) -> Result<()>;
+}
+
+/// `AVPlayer` with an `AVPlayerItemVideoOutput`.
+pub(super) struct Player {
     player: *mut AnyObject,
     output: *mut AnyObject,
     /// Whether the track's transform has been looked at (once the item is
@@ -39,13 +100,15 @@ pub(super) struct Decoder {
     transform_checked: Cell<bool>,
     looping: Cell<bool>,
     size: Cell<Size<DevicePixels>>,
-    /// The texture cache, with the `MTLDevice` it was made for.
-    cache: RefCell<Option<(*const c_void, CFRef)>>,
+    cache: TextureCache,
     frames_shown: Cell<u64>,
     last_import: Cell<Option<Instant>>,
 }
 
-impl Decoder {
+/// The texture cache, with the `MTLDevice` it was made for.
+type TextureCache = RefCell<Option<(*const c_void, CFRef)>>;
+
+impl Player {
     pub fn open(source: Source) -> Result<Self> {
         // SAFETY: called on the main thread, which has an autorelease pool;
         // the objects kept are retained here and released in `drop`.
@@ -222,7 +285,7 @@ impl Decoder {
         let context = crate::ios::gpu_context().ok_or_else(|| anyhow!("no GPU context yet"))?;
         let context = context.borrow();
         let context = context.as_ref().ok_or_else(|| anyhow!("no GPU context yet"))?;
-        let texture = self.import(buffer, &context.device)?;
+        let texture = import(&self.cache, buffer, &context.device)?;
         gpui_wgpu::set_external_texture(image_id, &texture);
         self.size.set(Size {
             width: DevicePixels(texture.width() as i32),
@@ -283,90 +346,251 @@ impl Decoder {
             }
         }
     }
+}
 
-    fn import(&self, buffer: CFRef, device: &wgpu::Device) -> Result<wgpu::Texture> {
-        // SAFETY: a live wgpu device; no raw queue operations happen here.
-        let hal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
-            .ok_or_else(|| anyhow!("video frames need the Metal backend"))?;
-        let metal_device = Retained::as_ptr(hal.raw_device()).cast::<c_void>();
-        let mut cache = self.cache.borrow_mut();
-        if cache.as_ref().is_none_or(|(device, _)| *device != metal_device) {
-            let mut created = ptr::null_mut();
-            // SAFETY: a live MTLDevice; the cache is owned by `CFRef`.
-            let status = unsafe {
-                CVMetalTextureCacheCreate(ptr::null(), ptr::null(), metal_device, ptr::null(), &mut created)
-            };
-            let created = CFRef::new(created).filter(|_| status == 0);
-            *cache = Some((metal_device, created.ok_or_else(|| anyhow!("CVMetalTextureCacheCreate: {status}"))?));
-        }
-        let (_, cache) = cache.as_ref().ok_or_else(|| anyhow!("no texture cache"))?;
-        // SAFETY: `buffer` is a live pixel buffer; the CV texture is owned by
-        // `CFRef` and keeps the IOSurface, and with it the MTLTexture, valid.
-        let (width, height, cv_texture) = unsafe {
-            let (width, height) = (CVPixelBufferGetWidth(buffer.0), CVPixelBufferGetHeight(buffer.0));
-            let mut cv_texture = ptr::null_mut();
-            let status = CVMetalTextureCacheCreateTextureFromImage(
-                ptr::null(),
-                cache.0,
-                buffer.0,
-                ptr::null(),
-                MTL_PIXEL_FORMAT_BGRA8,
-                width,
-                height,
-                0,
-                &mut cv_texture,
-            );
-            let cv_texture = CFRef::new(cv_texture)
-                .filter(|_| status == 0)
-                .ok_or_else(|| anyhow!("CVMetalTextureCacheCreateTextureFromImage: {status}"))?;
-            (width as u32, height as u32, cv_texture)
+/// Wraps an IOSurface-backed BGRA pixel buffer as a wgpu texture.
+fn import(cache: &TextureCache, buffer: CFRef, device: &wgpu::Device) -> Result<wgpu::Texture> {
+    // SAFETY: a live wgpu device; no raw queue operations happen here.
+    let hal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
+        .ok_or_else(|| anyhow!("video frames need the Metal backend"))?;
+    let metal_device = Retained::as_ptr(hal.raw_device()).cast::<c_void>();
+    let mut cache = cache.borrow_mut();
+    if cache.as_ref().is_none_or(|(device, _)| *device != metal_device) {
+        let mut created = ptr::null_mut();
+        // SAFETY: a live MTLDevice; the cache is owned by `CFRef`.
+        let status = unsafe {
+            CVMetalTextureCacheCreate(ptr::null(), ptr::null(), metal_device, ptr::null(), &mut created)
         };
-        // SAFETY: the CV texture returns its MTLTexture (+0), retained here.
-        let raw = unsafe {
-            Retained::retain(CVMetalTextureGetTexture(cv_texture.0).cast::<ProtocolObject<dyn MTLTexture>>())
-        }
-        .ok_or_else(|| anyhow!("CVMetalTexture without an MTLTexture"))?;
-        let size = wgpu::Extent3d {
+        let created = CFRef::new(created).filter(|_| status == 0);
+        *cache = Some((metal_device, created.ok_or_else(|| anyhow!("CVMetalTextureCacheCreate: {status}"))?));
+    }
+    let (_, cache) = cache.as_ref().ok_or_else(|| anyhow!("no texture cache"))?;
+    // SAFETY: `buffer` is a live pixel buffer; the CV texture is owned by
+    // `CFRef` and keeps the IOSurface, and with it the MTLTexture, valid.
+    let (width, height, cv_texture) = unsafe {
+        let (width, height) = (CVPixelBufferGetWidth(buffer.0), CVPixelBufferGetHeight(buffer.0));
+        let mut cv_texture = ptr::null_mut();
+        let status = CVMetalTextureCacheCreateTextureFromImage(
+            ptr::null(),
+            cache.0,
+            buffer.0,
+            ptr::null(),
+            MTL_PIXEL_FORMAT_BGRA8,
             width,
             height,
-            depth_or_array_layers: 1,
+            0,
+            &mut cv_texture,
+        );
+        let cv_texture = CFRef::new(cv_texture)
+            .filter(|_| status == 0)
+            .ok_or_else(|| anyhow!("CVMetalTextureCacheCreateTextureFromImage: {status}"))?;
+        (width as u32, height as u32, cv_texture)
+    };
+    // SAFETY: the CV texture returns its MTLTexture (+0), retained here.
+    let raw = unsafe {
+        Retained::retain(CVMetalTextureGetTexture(cv_texture.0).cast::<ProtocolObject<dyn MTLTexture>>())
+    }
+    .ok_or_else(|| anyhow!("CVMetalTexture without an MTLTexture"))?;
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    // SAFETY: a 2D BGRA8 texture of this size from this device; the
+    // pixel buffer and CV texture stay alive until wgpu drops it.
+    let texture = unsafe {
+        let texture = wgpu::hal::metal::Device::texture_from_raw(
+            raw,
+            wgpu::TextureFormat::Bgra8Unorm,
+            MTLTextureType::Type2D,
+            1,
+            1,
+            wgpu::hal::CopyExtent {
+                width,
+                height,
+                depth: 1,
+            },
+            Some(Box::new(move || drop((cv_texture, buffer)))),
+        );
+        device.create_texture_from_hal::<wgpu::hal::api::Metal>(
+            texture,
+            &wgpu::TextureDescriptor {
+                label: Some("video frame"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::TextureUses::RESOURCE,
+        )
+    };
+    Ok(texture)
+}
+
+/// FFmpeg demuxing, decoding through VideoToolbox (or in software), with the
+/// video thread on the shared clock ([`super::player`]).
+#[cfg(feature = "ffmpeg")]
+pub(super) struct FfmpegPlayer {
+    size: Size<DevicePixels>,
+    rotation: i32,
+    duration_us: i64,
+    shared: Arc<Shared>,
+    thread: Option<JoinHandle<()>>,
+    slot: Arc<Mutex<Option<Picture>>>,
+    cache: TextureCache,
+    uploader: RefCell<Uploader>,
+    frames_shown: Cell<u64>,
+    last_import: Cell<Option<Instant>>,
+}
+
+#[cfg(feature = "ffmpeg")]
+impl FfmpegPlayer {
+    fn open(source: Source, software: bool) -> Result<Self> {
+        let Source::File(path) = source else {
+            // Built without network, as on Android.
+            bail!("the FFmpeg backend plays files only, not {source:?}");
         };
-        // SAFETY: a 2D BGRA8 texture of this size from this device; the
-        // pixel buffer and CV texture stay alive until wgpu drops it.
-        let texture = unsafe {
-            let texture = wgpu::hal::metal::Device::texture_from_raw(
-                raw,
-                wgpu::TextureFormat::Bgra8Unorm,
-                MTLTextureType::Type2D,
-                1,
-                1,
-                wgpu::hal::CopyExtent {
-                    width,
-                    height,
-                    depth: 1,
-                },
-                Some(Box::new(move || drop((cv_texture, buffer)))),
-            );
-            device.create_texture_from_hal::<wgpu::hal::api::Metal>(
-                texture,
-                &wgpu::TextureDescriptor {
-                    label: Some("video frame"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Bgra8Unorm,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                },
-                wgpu::TextureUses::RESOURCE,
-            )
+        let info = super::ffmpeg::probe(path)?;
+        if info.has_audio {
+            // ponytail: no sound yet; the video follows the monotonic clock.
+            // Add an AudioQueue sink driving the clock, as AAudio does on Android.
+            log::warn!("video: the FFmpeg backend plays no sound on iOS yet");
+        }
+        let slot = Arc::new(Mutex::new(None));
+        let (mut video, _) = super::ffmpeg::FfmpegVideo::open(path, (!software).then_some(()), slot.clone())?;
+        log::info!(
+            "video: FFmpeg playing {}x{} (rotated {}°) from {path:?}",
+            info.width,
+            info.height,
+            info.rotation
+        );
+        let shared = Shared::new(false);
+        let thread = std::thread::Builder::new().name("gpui-video".into()).spawn({
+            let shared = shared.clone();
+            move || {
+                if let Err(error) = play_video(&mut video, &shared) {
+                    log::error!("video: decoding stopped: {error:#}");
+                }
+            }
+        })?;
+        let (width, height) =
+            if info.rotation % 180 == 90 { (info.height, info.width) } else { (info.width, info.height) };
+        Ok(Self {
+            size: Size {
+                width: DevicePixels(width),
+                height: DevicePixels(height),
+            },
+            rotation: info.rotation,
+            duration_us: info.duration_us,
+            shared,
+            thread: Some(thread),
+            slot,
+            cache: RefCell::new(None),
+            uploader: RefCell::new(Uploader::default()),
+            frames_shown: Cell::new(0),
+            last_import: Cell::new(None),
+        })
+    }
+
+    fn video_size(&self) -> Size<DevicePixels> {
+        self.size
+    }
+
+    fn frames_shown(&self) -> u64 {
+        self.frames_shown.get()
+    }
+
+    fn play(&self) {
+        self.shared.play()
+    }
+
+    fn pause(&self) {
+        self.shared.pause()
+    }
+
+    fn is_paused(&self) -> bool {
+        self.shared.is_paused()
+    }
+
+    fn seek(&self, position: Duration) {
+        self.shared.seek((position.as_micros() as i64).clamp(0, self.duration_us))
+    }
+
+    fn set_looping(&self, looping: bool) {
+        self.shared.set_looping(looping)
+    }
+
+    fn position(&self) -> Duration {
+        Duration::from_micros(self.shared.position_us().clamp(0, self.duration_us) as u64)
+    }
+
+    fn duration(&self) -> Duration {
+        Duration::from_micros(self.duration_us as u64)
+    }
+
+    fn ended(&self) -> bool {
+        self.shared.ended()
+    }
+
+    fn is_active(&self) -> bool {
+        self.shared.is_active(self.last_import.get())
+    }
+
+    /// Imports the newest decoded picture, if there is one, and makes it the
+    /// texture drawn for `image_id`.
+    fn update(&self, image_id: ImageId) -> Result<()> {
+        let Some(picture) = self.slot.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+            return Ok(());
         };
-        Ok(texture)
+        let context = crate::ios::gpu_context().ok_or_else(|| anyhow!("no GPU context yet"))?;
+        let context = context.borrow();
+        let context = context.as_ref().ok_or_else(|| anyhow!("no GPU context yet"))?;
+        let (texture, path) = match picture.pixel_buffer() {
+            Some(buffer) => {
+                // SAFETY: a live pixel buffer; the texture keeps its own reference.
+                let buffer = CFRef::new(unsafe { CFRetain(buffer) }).ok_or_else(|| anyhow!("null pixel buffer"))?;
+                let texture = import(&self.cache, buffer, &context.device)?;
+                let texture = if self.rotation == 0 {
+                    Arc::new(texture)
+                } else {
+                    self.uploader
+                        .borrow_mut()
+                        .rotate(&texture, self.rotation, &context.device, &context.queue)?
+                };
+                (texture, "VideoToolbox pixel buffer imported as a Metal texture")
+            }
+            None => (
+                self.uploader
+                    .borrow_mut()
+                    .convert(&picture, self.rotation, &context.device, &context.queue)?,
+                "software frame uploaded as planes, converted on the GPU",
+            ),
+        };
+        gpui_wgpu::set_external_texture(image_id, &texture);
+        self.last_import.set(Some(Instant::now()));
+        let shown = self.frames_shown.get() + 1;
+        self.frames_shown.set(shown);
+        if shown == 1 {
+            log::info!("video: {path}, {}x{}", texture.width(), texture.height());
+        }
+        Ok(())
     }
 }
 
-impl Drop for Decoder {
+#[cfg(feature = "ffmpeg")]
+impl Drop for FfmpegPlayer {
+    fn drop(&mut self) {
+        self.shared.update(|state| state.stop = true);
+        if self.thread.take().is_some_and(|thread| thread.join().is_err()) {
+            log::error!("video: playback thread panicked");
+        }
+    }
+}
+
+impl Drop for Player {
     fn drop(&mut self) {
         // SAFETY: owned references, released once, on the main thread.
         unsafe {
@@ -487,6 +711,8 @@ extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CFRelease(object: *const c_void);
+    #[cfg(feature = "ffmpeg")]
+    fn CFRetain(object: *mut c_void) -> *mut c_void;
 }
 
 #[link(name = "CoreVideo", kind = "framework")]
