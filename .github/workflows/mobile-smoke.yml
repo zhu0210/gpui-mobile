@@ -93,6 +93,20 @@ jobs:
         with:
           workspaces: example
 
+      - uses: actions/cache@v4
+        with:
+          path: target/ffmpeg-ios/simulator
+          key: ffmpeg-ios-simulator-${{ hashFiles('scripts/build-ffmpeg-ios.sh') }}
+
+      # LGPL FFmpeg with VideoToolbox, for `media::Backend::Ffmpeg`.
+      - name: Build FFmpeg
+        run: |
+          [ -d target/ffmpeg-ios/simulator/Frameworks ] || scripts/build-ffmpeg-ios.sh simulator
+          dir="$GITHUB_WORKSPACE/target/ffmpeg-ios/simulator"
+          echo "FFMPEG_DIR=$dir" >> "$GITHUB_ENV"
+          echo "FFMPEG_LDFLAGS=-L$dir/lib -lavutil -lswresample -lswscale -lavcodec -lavformat" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim=-isysroot $(xcrun --sdk iphonesimulator --show-sdk-path)" >> "$GITHUB_ENV"
+
       - name: Generate the Xcode project
         working-directory: example/ios
         run: brew install xcodegen && xcodegen generate --spec project.yml
@@ -100,7 +114,7 @@ jobs:
       - name: Build the Rust library
         working-directory: example
         run: |
-          cargo build --lib --target aarch64-apple-ios-sim
+          cargo build --lib --target aarch64-apple-ios-sim --features ffmpeg
           ls -la target/aarch64-apple-ios-sim/debug/*.a
 
       - name: Build for the simulator
@@ -110,6 +124,7 @@ jobs:
             -configuration Debug -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build ENABLE_USER_SCRIPT_SANDBOXING=NO \
+            GPUI_CARGO_FEATURES=ffmpeg FFMPEG_DIR="$FFMPEG_DIR" FFMPEG_LDFLAGS="$FFMPEG_LDFLAGS" \
             CODE_SIGNING_ALLOWED=NO build
 
       - name: Launch on the simulator
@@ -120,8 +135,8 @@ jobs:
           sim=$(xcrun simctl list devices available | grep -m1 "iPhone" | sed -E 's/.*\(([A-F0-9-]+)\).*/\1/')
           xcrun simctl boot "$sim"
           xcrun simctl bootstatus "$sim" -b
-          # Dark mode: the light sample must still get dark status bar text.
-          xcrun simctl ui "$sim" appearance dark
+          # Light mode: the dark menu must still get light status bar text.
+          xcrun simctl ui "$sim" appearance light
           xcrun simctl install "$sim" "$app"
           xcrun simctl launch "$sim" dev.gpui.mobile.example
           sleep 20
@@ -136,6 +151,46 @@ jobs:
             tail -40 smoke/log.txt
             exit 1
           fi
+          # The in-scene video screen (`gpui_mobile::media`), opened directly.
+          xcrun simctl terminate "$sim" dev.gpui.mobile.example || true
+          SIMCTL_CHILD_GPUI_INITIAL_SCREEN=native_video xcrun simctl launch "$sim" dev.gpui.mobile.example
+          sleep 15
+          xcrun simctl io "$sim" screenshot smoke/native-video.png
+          xcrun simctl spawn "$sim" log show --last 1m --style compact \
+            --predicate 'process == "GpuiExample"' > smoke/native-video-log.txt || true
+          grep -E "video:|panic" smoke/native-video-log.txt | tail -20 || true
+          # The rotated clip, turned by the track's transform.
+          xcrun simctl terminate "$sim" dev.gpui.mobile.example || true
+          SIMCTL_CHILD_GPUI_INITIAL_SCREEN=native_video SIMCTL_CHILD_GPUI_VIDEO_CLIP=1 \
+            xcrun simctl launch "$sim" dev.gpui.mobile.example
+          sleep 15
+          xcrun simctl io "$sim" screenshot smoke/native-video-rotated.png
+          xcrun simctl spawn "$sim" log show --last 1m --style compact \
+            --predicate 'process == "GpuiExample"' | grep -E "video:|panic" | tail -20 || true
+          # A stream over HTTPS (Big Buck Bunny), through `VideoFrames::open_url`.
+          xcrun simctl terminate "$sim" dev.gpui.mobile.example || true
+          SIMCTL_CHILD_GPUI_INITIAL_SCREEN=native_video SIMCTL_CHILD_GPUI_VIDEO_CLIP=2 \
+            xcrun simctl launch "$sim" dev.gpui.mobile.example
+          sleep 25
+          xcrun simctl io "$sim" screenshot smoke/native-video-stream.png
+          xcrun simctl spawn "$sim" log show --last 1m --style compact \
+            --predicate 'process == "GpuiExample"' | grep -E "video:|panic" | tail -20 || true
+          # FFmpeg (GPUI_VIDEO_BACKEND 1: VideoToolbox, 2: software), plain and rotated.
+          for run in "1 0 ffmpeg" "1 1 ffmpeg-rotated" "2 0 ffmpeg-software" "2 1 ffmpeg-software-rotated"; do
+            read -r backend clip name <<<"$run"
+            xcrun simctl terminate "$sim" dev.gpui.mobile.example || true
+            SIMCTL_CHILD_GPUI_INITIAL_SCREEN=native_video SIMCTL_CHILD_GPUI_VIDEO_CLIP=$clip \
+              SIMCTL_CHILD_GPUI_VIDEO_BACKEND=$backend xcrun simctl launch \
+              --stderr="$PWD/smoke/native-video-$name-stderr.txt" "$sim" dev.gpui.mobile.example
+            sleep 15
+            xcrun simctl io "$sim" screenshot "smoke/native-video-$name.png"
+            xcrun simctl spawn "$sim" log show --last 1m --style compact \
+              --predicate 'process == "GpuiExample"' > "smoke/native-video-$name-log.txt" || true
+            echo "== $name"
+            grep -E "video:|panic" "smoke/native-video-$name-log.txt" | tail -20 || true
+            # FFmpeg's own messages go to stderr.
+            tail -20 "smoke/native-video-$name-stderr.txt" || true
+          done
 
       - name: Upload screenshot and logs
         if: always()
@@ -163,6 +218,20 @@ jobs:
         with:
           workspaces: example
 
+      - uses: actions/cache@v4
+        with:
+          path: target/ffmpeg-ios/device
+          key: ffmpeg-ios-device-${{ hashFiles('scripts/build-ffmpeg-ios.sh') }}
+
+      # LGPL FFmpeg with VideoToolbox, for `media::Backend::Ffmpeg`.
+      - name: Build FFmpeg
+        run: |
+          [ -d target/ffmpeg-ios/device/Frameworks ] || scripts/build-ffmpeg-ios.sh device
+          dir="$GITHUB_WORKSPACE/target/ffmpeg-ios/device"
+          echo "FFMPEG_DIR=$dir" >> "$GITHUB_ENV"
+          echo "FFMPEG_LDFLAGS=-L$dir/lib -lavutil -lswresample -lswscale -lavcodec -lavformat" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios=-isysroot $(xcrun --sdk iphoneos --show-sdk-path)" >> "$GITHUB_ENV"
+
       - name: Generate the Xcode project
         working-directory: example/ios
         run: brew install xcodegen && xcodegen generate --spec project.yml
@@ -170,7 +239,7 @@ jobs:
       - name: Build the Rust library
         working-directory: example
         run: |
-          cargo build --lib --target aarch64-apple-ios --release
+          cargo build --lib --target aarch64-apple-ios --release --features ffmpeg
           ls -la target/aarch64-apple-ios/release/*.a
 
       - name: Build for devices, unsigned
@@ -180,8 +249,10 @@ jobs:
             -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build ENABLE_USER_SCRIPT_SANDBOXING=NO \
+            GPUI_CARGO_FEATURES=ffmpeg FFMPEG_DIR="$FFMPEG_DIR" FFMPEG_LDFLAGS="$FFMPEG_LDFLAGS" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
+          ls build/Build/Products/Release-iphoneos/GpuiExample.app/Frameworks
 
       # SideStore signs it on the device.
       - name: Package the IPA

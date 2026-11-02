@@ -60,9 +60,6 @@ pub mod location;
 #[cfg(feature = "audio")]
 pub mod audio;
 
-#[cfg(feature = "video_player")]
-pub mod video_player;
-
 #[cfg(feature = "media_session")]
 pub mod media_session;
 

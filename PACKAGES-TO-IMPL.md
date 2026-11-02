@@ -20,7 +20,7 @@ Create todos for each package implementation, and track progress in the `TODO.md
 8. https://pub.dev/packages/geolocator in src/packages/location/
 9. https://pub.dev/packages/location in src/packages/location/
 10. https://pub.dev/packages/flutter_local_notifications in src/packages/notifications/
-12. https://pub.dev/packages/video_player in src/packages/video_player/
+12. https://pub.dev/packages/video_player: `gpui_mobile::media::VideoFrames` (feature `media`)
 13. https://pub.dev/packages/just_audio in src/packages/audio/
 
 

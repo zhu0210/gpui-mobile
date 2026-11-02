@@ -68,12 +68,23 @@ targets:
           - "-framework WebKit"
           - "-framework CoreMedia"
           - "-framework AVFoundation"
+          - "-framework VideoToolbox"
+          - "-framework CoreVideo"
           - "-framework LocalAuthentication"
           - "-framework Contacts"
           - "-framework EventKit"
           - "-framework StoreKit"
           - "-framework CoreMotion"
           - "-ObjC"
+          - "$(FFMPEG_LDFLAGS)"
+        # FFmpeg (the `ffmpeg` feature): set GPUI_CARGO_FEATURES=ffmpeg,
+        # FFMPEG_DIR (scripts/build-ffmpeg-ios.sh's output) and FFMPEG_LDFLAGS
+        # (-L$FFMPEG_DIR/lib -lavutil -lswresample -lswscale -lavcodec
+        # -lavformat) on the xcodebuild command line.
+        FFMPEG_LDFLAGS: ""
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
         # Preprocessor macros — enable Rust GPUI integration
         GCC_PREPROCESSOR_DEFINITIONS:
           - "USE_GPUI_RUST=1"
@@ -127,8 +138,25 @@ targets:
           rustup target add "${RUST_TARGET}" 2>/dev/null || true
 
           # Build the Rust static library
-          cargo build --lib --target "${RUST_TARGET}" ${CARGO_FLAGS} 2>&1
+          cargo build --lib --target "${RUST_TARGET}" ${CARGO_FLAGS} \
+            ${GPUI_CARGO_FEATURES:+--features "${GPUI_CARGO_FEATURES}"} 2>&1
 
           echo "Rust build complete for ${RUST_TARGET}"
+        shell: /bin/bash
+        basedOnDependencyAnalysis: false
+    postBuildScripts:
+      - name: "Embed FFmpeg"
+        script: |
+          set -euo pipefail
+          [ -n "${FFMPEG_DIR:-}" ] || exit 0
+          destination="${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}"
+          mkdir -p "${destination}"
+          for framework in "${FFMPEG_DIR}"/Frameworks/*.framework; do
+            rm -rf "${destination}/$(basename "${framework}")"
+            cp -R "${framework}" "${destination}/"
+            if [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ] && [ "${CODE_SIGNING_ALLOWED:-YES}" = YES ]; then
+              codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" "${destination}/$(basename "${framework}")"
+            fi
+          done
         shell: /bin/bash
         basedOnDependencyAnalysis: false

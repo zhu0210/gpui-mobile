@@ -280,15 +280,15 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                     }),
                 ))
                 .child(nav_card(
-                    "🎬",
-                    "Video Player",
-                    "Play videos with controls, speed & looping",
+                    "🎞",
+                    "Video in the Scene",
+                    "Decoded frames drawn by GPUI, no CPU copies",
                     MAUVE,
                     card_bg,
                     text_color,
                     sub_text,
                     cx.listener(|this, _event, _window, cx| {
-                        this.navigate_to(Screen::VideoPlayer);
+                        this.navigate_to(Screen::NativeVideo);
                         cx.notify();
                     }),
                 )),
