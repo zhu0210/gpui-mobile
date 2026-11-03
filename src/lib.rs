@@ -367,6 +367,25 @@ pub fn set_keyboard_height(height: f32) {
     }
 }
 
+// ── Window controls ──────────────────────────────────────────────────────────
+
+static WINDOW_CONTROLS_BITS: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+
+/// The `(width, height)` in logical points of the top leading corner that
+/// iPadOS 26's window controls (close, minimize, full screen) cover in a
+/// windowed app; `(0, 0)` without them and on other platforms. Something at the
+/// top leading edge of the window moves right by the width, or down by the height.
+pub fn window_controls() -> (f32, f32) {
+    let get = |i: usize| f32::from_bits(WINDOW_CONTROLS_BITS[i].load(Ordering::Relaxed));
+    (get(0), get(1))
+}
+
+/// Sets what [`window_controls`] returns (called from the platform layer).
+pub fn set_window_controls(width: f32, height: f32) {
+    WINDOW_CONTROLS_BITS[0].store(width.max(0.0).to_bits(), Ordering::Relaxed);
+    WINDOW_CONTROLS_BITS[1].store(height.max(0.0).to_bits(), Ordering::Relaxed);
+}
+
 // ── Safe area insets ─────────────────────────────────────────────────────────
 
 /// Query the safe area insets from the platform.
