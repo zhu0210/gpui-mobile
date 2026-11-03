@@ -500,6 +500,43 @@ mod tests {
         plays_and_seeks(reader(assets().join("av-60s-640x360.mp4")), 60.0);
     }
 
+    /// A file whose read fails once, past `fail_at`, as a network drop does.
+    struct Flaky {
+        file: std::fs::File,
+        fail_at: u64,
+        failed: bool,
+    }
+
+    impl io::Read for Flaky {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.failed && io::Seek::stream_position(&mut self.file)? >= self.fail_at {
+                self.failed = true;
+                return Err(io::Error::other("connection reset"));
+            }
+            self.file.read(buf)
+        }
+    }
+
+    impl io::Seek for Flaky {
+        fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+            self.file.seek(to)
+        }
+    }
+
+    #[test]
+    fn a_failed_read_does_not_end_the_video() {
+        let path = assets().join("av-60s-640x360.mp4");
+        let fail_at = std::fs::metadata(&path).unwrap().len() / 20;
+        let origin = Origin::Reader(Arc::new(move || {
+            Ok(Box::new(Flaky { file: std::fs::File::open(&path)?, fail_at, failed: false }) as Box<dyn crate::media::ReadSeek>)
+        }));
+        let info = probe(&origin).unwrap();
+        let slot = Arc::new(Mutex::new(None));
+        let (mut video, _) = FfmpegVideo::open(&origin, None, slot.clone(), Choices::new(&info)).unwrap();
+        // Past the failure (3 s in) the frames keep coming.
+        while next_frame(&mut video, &slot) < 6_000_000 {}
+    }
+
     #[test]
     fn encrypted_hls_plays_and_seeks_through_callbacks() {
         plays_and_seeks(hls(), 6.0);

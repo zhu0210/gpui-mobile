@@ -44,6 +44,8 @@ extern "C" {
 
 /// Microseconds, FFmpeg's `AV_TIME_BASE`.
 const MICROS: ffmpeg::Rational = ffmpeg::Rational(1, 1_000_000);
+/// How long a demuxer waits before reading again after a failed read.
+const READ_RETRY: Duration = Duration::from_millis(300);
 
 pub(super) fn init() {
     static INIT: Once = Once::new();
@@ -501,6 +503,13 @@ impl Demuxer {
                         break packet;
                     }
                     Ok(()) => self.add_cue(&packet),
+                    // A read that failed (a network drop) ends the input as
+                    // if it were done; read on from there instead, as a seek
+                    // would, after a moment.
+                    Err(_) if self.clear_read_error() => {
+                        std::thread::sleep(READ_RETRY);
+                        return Ok(());
+                    }
                     Err(ffmpeg::Error::Eof) => {
                         decoder.send_eof()?;
                         self.input_done = true;
@@ -541,6 +550,23 @@ impl Demuxer {
         self.pending = None;
         self.input_done = false;
         Ok(())
+    }
+
+    /// Whether the input stopped on a failed read, which it then forgets so
+    /// the next read tries again.
+    fn clear_read_error(&mut self) -> bool {
+        // SAFETY: the input's I/O context, when it has one, lives as long as
+        // the input; only this thread uses it.
+        unsafe {
+            let pb = (*self.input.as_mut_ptr()).pb;
+            if pb.is_null() || (*pb).error >= 0 || (*pb).error == ffi::AVERROR_EOF || (*pb).error == ffi::AVERROR_EXIT {
+                return false;
+            }
+            log::warn!("video: reading failed ({}), reading again", ffmpeg::Error::from((*pb).error));
+            (*pb).error = 0;
+            (*pb).eof_reached = 0;
+        }
+        true
     }
 
     fn micros(&self, timestamp: Option<i64>) -> i64 {
