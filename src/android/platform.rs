@@ -1121,13 +1121,6 @@ impl PlatformGestures for AndroidGestures {
 // file pickers, etc.) are no-ops or return sensible defaults.
 
 impl Platform for AndroidPlatform {
-    fn platform_info(&self) -> gpui::PlatformInfo {
-        gpui::PlatformInfo {
-            os: gpui::OperatingSystem::Android,
-            target: gpui::PlatformTarget::Native,
-        }
-    }
-
     fn gestures(&self) -> Option<Rc<dyn PlatformGestures>> {
         Some(Rc::new(AndroidGestures))
     }
@@ -1507,9 +1500,6 @@ impl SharedPlatform {
 /// so the compiler never accidentally picks the inherent method (which may
 /// have a different return type).
 impl Platform for SharedPlatform {
-    fn platform_info(&self) -> gpui::PlatformInfo {
-        <AndroidPlatform as Platform>::platform_info(&self.0)
-    }
     fn gestures(&self) -> Option<Rc<dyn PlatformGestures>> {
         <AndroidPlatform as Platform>::gestures(&self.0)
     }

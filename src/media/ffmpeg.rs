@@ -24,7 +24,8 @@ use gpui::{DevicePixels, ImageId, Size};
 #[cfg(any(target_os = "ios", target_os = "linux"))]
 use std::cell::{Cell, RefCell};
 #[cfg(any(target_os = "ios", target_os = "linux"))]
-use std::time::{Duration, Instant};
+use std::time::Instant;
+use std::time::Duration;
 use super::input::{Opened, Origin};
 use super::planes::Picture;
 use super::Track;
