@@ -326,6 +326,7 @@ pub extern "C" fn gpui_ios_request_frame(window_ptr: *mut c_void) -> bool {
     // slate is cleared before the frame, not after.
     window.frame_demand.clear();
     window.follow_keyboard();
+    window.follow_insets();
 
     // Take the callback, invoke it, then restore it
     // We must complete the borrow before invoking the callback,
@@ -637,6 +638,15 @@ pub unsafe extern "C" fn gpui_ios_view_controller(window: *mut c_void) -> *mut c
             .view_controller_ptr()
             .cast()
     }
+}
+
+/// Tells GPUI the size of the corner iPadOS 26's window controls take in the
+/// view's top leading corner (0 by 0 without them), as the host reads it from
+/// `UIView.layoutGuide(for: .margins(cornerAdaptation:))`. Apps read it with
+/// [`crate::window_controls`]; the next frame lays out again if it changed.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_set_window_controls(width: f64, height: f64) {
+    crate::set_window_controls(width as f32, height as f32);
 }
 
 /// Forward host layout changes after assigning the embedded view's bounds.

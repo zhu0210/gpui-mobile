@@ -614,6 +614,8 @@ pub(crate) struct IosWindow {
     resize_callback: RefCell<Option<Box<dyn FnMut(Size<Pixels>, f32)>>>,
     /// The keyboard height GPUI last laid out for; see [`Self::follow_keyboard`].
     laid_out_keyboard: Cell<f32>,
+    /// The safe area and window controls GPUI last laid out for; see [`Self::follow_insets`].
+    laid_out_insets: Cell<[f32; 6]>,
     /// Callback for move events (not applicable on iOS)
     moved_callback: RefCell<Option<Box<dyn FnMut()>>>,
     /// Callback for should close
@@ -758,6 +760,7 @@ impl IosWindow {
                 hover_status_callback: RefCell::new(None),
                 resize_callback: RefCell::new(None),
                 laid_out_keyboard: Cell::new(0.0),
+                laid_out_insets: Cell::new([0.0; 6]),
                 moved_callback: RefCell::new(None),
                 should_close_callback: RefCell::new(None),
                 hit_test_callback: RefCell::new(None),
@@ -1358,6 +1361,20 @@ impl IosWindow {
     pub(super) fn follow_keyboard(&self) {
         let keyboard = crate::keyboard_height();
         if self.laid_out_keyboard.replace(keyboard) != keyboard {
+            self.notify_resize(self.bounds.get().size, self.scale_factor.get());
+        }
+    }
+
+    /// Re-lays GPUI out when the safe area or the window controls' corner has
+    /// changed since the last frame. Neither changes the view's size: iPadOS 26
+    /// adds its window controls to a window after it has been sized, and an app
+    /// that pads by the insets would otherwise keep the old ones until something
+    /// else redraws it.
+    pub(super) fn follow_insets(&self) {
+        let (top, bottom, left, right) = self.safe_area_insets();
+        let (width, height) = crate::window_controls();
+        let now = [top, bottom, left, right, width, height];
+        if self.laid_out_insets.replace(now) != now {
             self.notify_resize(self.bounds.get().size, self.scale_factor.get());
         }
     }
