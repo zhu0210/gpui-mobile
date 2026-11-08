@@ -6,7 +6,7 @@ name: Mobile smoke tests
 
 on:
   push:
-    branches: [gpui-pre-0.3.10]
+    branches: [gpui-pre-0.3.10, gpui-pre-0.3.11]
   workflow_dispatch:
 
 concurrency:
