@@ -181,7 +181,7 @@ gpui = { package = "gpui-pre", version = "=0.3.11", default-features = false, fe
 
 # `examples/desktop_video.rs`: a desktop GPUI window.
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dev-dependencies]
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["wayland", "x11"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit", "wayland", "x11"] }
 env_logger = "0.11"
 
 [[example]]

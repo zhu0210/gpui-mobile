@@ -125,6 +125,24 @@ same way:
 gpui-pre-wgpu = { git = "https://github.com/longbridge/gpui-mobile" }
 ```
 
+## Video on the desktop
+
+`media::VideoFrames` (the `ffmpeg` feature) also plays on Linux, macOS and
+Windows, decoding on the GPU and drawing the decoder's frames without copying
+them through memory: VA-API into wgpu on Linux, VideoToolbox pixel buffers
+through `Window::paint_surface` on macOS, and Direct3D 11 video decoding on
+GPUI's own device on Windows. Windows needs the vendored `gpui-pre-windows`
+(`vendor/README.md`), which an application patches in beside `gpui-pre-wgpu`:
+
+```toml
+[patch.crates-io]
+gpui-pre-windows = { git = "https://github.com/longbridge/gpui-mobile" }
+```
+
+`cargo run --example desktop_video --no-default-features --features ffmpeg --
+<file>` plays a file; `.github/workflows/desktop-video.yml` runs it on macOS and
+Windows.
+
 ## Screenshots
 
 Running on a Motorola Edge 50 Pro (Android, Vulkan):
