@@ -76,12 +76,15 @@ jobs:
             shift
             GPUI_VIDEO_QUIT_AFTER=12 GPUI_VIDEO_MUTED=1 RUST_LOG=info target/debug/examples/desktop_video "$@" > "out/$name.log" 2>&1 &
             pid=$!
-            sleep 7
-            if [ "$RUNNER_OS" = macOS ]; then
-              screencapture -x "out/$name.png" || true
-            else
-              powershell -ExecutionPolicy Bypass -File .github/scripts/screenshot.ps1 "$(cygpath -w "$PWD/out/$name.png")" || true
-            fi
+            # Twice: the first tells a slow start from a picture that never comes.
+            for at in 5 9; do
+              sleep $((at == 5 ? 5 : 4))
+              if [ "$RUNNER_OS" = macOS ]; then
+                screencapture -x "out/$name-$at.png" || true
+              else
+                powershell -ExecutionPolicy Bypass -File .github/scripts/screenshot.ps1 "$(cygpath -w "$PWD/out/$name-$at.png")" || true
+              fi
+            done
             if ! wait "$pid"; then
               echo "::error::$name showed no frame, or crashed"
               failed=1
@@ -93,6 +96,7 @@ jobs:
           play software $clips/av-60s-640x360.mp4 software
           play turned $clips/rotated-90.mp4
           play tracks $clips/tracks.mp4 reader
+          play hardware-again $clips/av-60s-640x360.mp4
           exit $failed
 
       - uses: actions/upload-artifact@v6
