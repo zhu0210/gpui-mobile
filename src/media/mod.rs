@@ -9,7 +9,8 @@
 //! [`RenderImage`] whose id the patched `gpui-pre-wgpu` atlas answers with the
 //! current frame's texture (`gpui_wgpu::set_external_texture`). Applications
 //! must therefore patch `gpui-pre-wgpu` with `vendor/gpui-pre-wgpu`, as for
-//! `offscreen`.
+//! `offscreen` (and `gpui-pre-windows` with `vendor/gpui-pre-windows` when
+//! they build for Windows).
 //!
 //! - Android: `AMediaExtractor` + `AMediaCodec` decode into an `AImageReader`;
 //!   each frame's `AHardwareBuffer` is imported into Vulkan and converted from
@@ -28,6 +29,18 @@
 //!   - Linux (the only backend there; [`Backend::Platform`] means FFmpeg too):
 //!     through VA-API on the window's GPU, each surface imported into Vulkan
 //!     as DMA-BUF planes and converted to RGBA; audio through cpal.
+//!   - macOS and Windows (FFmpeg only, as on Linux), on GPUI's own renderers
+//!     instead of wgpu:
+//!     - macOS: through VideoToolbox; each pixel buffer is drawn as a GPUI
+//!       surface (`Window::paint_surface`), its IOSurface planes sampled by
+//!       the Metal renderer. Nothing to patch. Surfaces draw square: `paint`
+//!       ignores `corner_radii` there.
+//!     - Windows: through Direct3D 11 on the renderer's own device; the video
+//!       processor converts each decoder texture to BGRA on the GPU, drawn
+//!       through the patched `gpui-pre-windows` atlas
+//!       (`vendor/gpui-pre-windows`, `gpui_windows::set_external_texture`).
+//!     - Software-decoded frames are converted by swscale and copied once.
+//!       Turned videos decode in software.
 //!
 //! Feature-gated behind `media`.
 
@@ -43,13 +56,23 @@ use ios::Decoder;
 mod linux;
 #[cfg(all(feature = "ffmpeg", target_os = "linux"))]
 use linux::Decoder;
-#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod ffmpeg;
 #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
 mod planes;
-#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+#[cfg(all(feature = "ffmpeg", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+mod cpal_sink;
+#[cfg(all(feature = "ffmpeg", target_os = "macos"))]
+mod macos;
+#[cfg(all(feature = "ffmpeg", target_os = "macos"))]
+use macos::Decoder;
+#[cfg(all(feature = "ffmpeg", target_os = "windows"))]
+mod d3d11;
+#[cfg(all(feature = "ffmpeg", target_os = "windows"))]
+use d3d11::Decoder;
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod input;
-#[cfg(any(target_os = "android", all(feature = "ffmpeg", any(target_os = "ios", target_os = "linux"))))]
+#[cfg(any(target_os = "android", all(feature = "ffmpeg", any(target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))))]
 mod player;
 
 use gpui::{px, size, Bounds, Corners, DevicePixels, Pixels, RenderImage, Size, Window};
@@ -63,6 +86,8 @@ use std::time::Duration;
 /// the monotonic clock for files without audio). It pauses by itself while
 /// the app is in the background.
 pub struct VideoFrames {
+    /// Unused on macOS, where frames are surfaces.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     image: Arc<RenderImage>,
     inner: Decoder,
 }
@@ -90,17 +115,17 @@ pub enum Backend {
 /// [`Detached::open_reader`] or [`Detached::open_hls`] and hand the result to
 /// the main thread, where [`Detached::attach`] gives the [`VideoFrames`].
 /// Playback starts on open, as with [`VideoFrames::open_reader`].
-#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub struct Detached(VideoFrames);
 
 // SAFETY: an FFmpeg player holds no main-thread state until it is first
 // painted: its platform caches (texture cache, import pipeline, uploader) start
 // empty and are filled by `paint` on the main thread, and its playback threads
 // share only `Send` state with it.
-#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows")))]
 unsafe impl Send for Detached {}
 
-#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows")))]
 impl Detached {
     /// [`VideoFrames::open_reader`], callable on any thread.
     pub fn open_reader(
@@ -150,7 +175,7 @@ impl VideoFrames {
     /// bytes, called once per playback thread (video, audio) and once to
     /// probe. FFmpeg seeks it as it needs; `SeekFrom::End(0)` gives the size,
     /// and a reader that can't answer that plays with the size unknown.
-    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows")))]
     pub fn open_reader(
         open: impl Fn() -> std::io::Result<Box<dyn ReadSeek>> + Send + Sync + 'static,
         backend: Backend,
@@ -167,7 +192,7 @@ impl VideoFrames {
     /// it returns), and the segments ahead of playback before they're needed;
     /// a master playlist is narrowed to one variant up to 1080 p, unless its
     /// audio is a rendition of its own.
-    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows")))]
     pub fn open_hls(
         playlist: &str,
         fetch: impl Fn(&str) -> std::io::Result<Vec<u8>> + Send + Sync + 'static,
@@ -315,12 +340,12 @@ impl VideoFrames {
         self.with_controls(|controls| controls.set_max_height(height));
     }
 
-    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows")))]
     fn with_controls<R>(&self, f: impl FnOnce(&ffmpeg::Controls) -> R) -> Option<R> {
         self.inner.controls().map(f)
     }
 
-    #[cfg(not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux"))))]
+    #[cfg(not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))))]
     fn with_controls<R>(&self, _f: impl FnOnce(&NoControls) -> R) -> Option<R> {
         None
     }
@@ -337,6 +362,15 @@ impl VideoFrames {
             window.request_animation_frame();
         }
         let bounds = contain(bounds, self.video_size());
+        // GPUI's Metal renderer draws the pixel buffer itself, square.
+        #[cfg(all(feature = "ffmpeg", target_os = "macos"))]
+        {
+            let _ = corner_radii;
+            if let Some(surface) = self.inner.platform().surface() {
+                window.paint_surface(bounds, surface);
+            }
+        }
+        #[cfg(not(all(feature = "ffmpeg", target_os = "macos")))]
         if let Err(error) = window.paint_image(bounds, bounds, corner_radii, self.image.clone(), 0, false) {
             log::warn!("painting video frame failed: {error:#}");
         }
@@ -347,6 +381,8 @@ impl Drop for VideoFrames {
     fn drop(&mut self) {
         #[cfg(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", target_os = "linux")))]
         gpui_wgpu::remove_external_texture(self.image.id);
+        #[cfg(all(feature = "ffmpeg", target_os = "windows"))]
+        gpui_windows::remove_external_texture(self.image.id);
     }
 }
 
@@ -364,10 +400,10 @@ pub struct Track {
 }
 
 /// What `with_controls` would hand out where there is no FFmpeg: nothing.
-#[cfg(not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux"))))]
+#[cfg(not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))))]
 enum NoControls {}
 
-#[cfg(not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux"))))]
+#[cfg(not(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))))]
 impl NoControls {
     fn audio_tracks(&self) -> &[Track] {
         match *self {}
@@ -402,7 +438,7 @@ pub trait ReadSeek: std::io::Read + std::io::Seek + Send {}
 impl<T: std::io::Read + std::io::Seek + Send> ReadSeek for T {}
 
 /// Rust-supplied bytes play only through FFmpeg.
-#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+#[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn ffmpeg_backend(backend: Backend) -> Backend {
     if backend == Backend::Platform { Backend::Ffmpeg } else { backend }
 }
@@ -483,16 +519,52 @@ fn yuv_to_rgb(bt709: bool, full_range: bool) -> [f32; 16] {
     ]
 }
 
+/// Copies a `width`×`height` picture of `pixel`-byte pixels from `source` to
+/// `target` (rows `source_stride` and `target_stride` bytes apart), turned
+/// clockwise by `rotation` degrees: what GPUI's own renderers, which draw
+/// frames upright only, need of a software frame. `target` holds the turned
+/// picture: `height`×`width` for a quarter turn.
+#[cfg(any(test, all(feature = "ffmpeg", any(target_os = "macos", target_os = "windows"))))]
+#[allow(clippy::too_many_arguments)]
+fn copy_turned(
+    source: &[u8],
+    source_stride: usize,
+    (width, height): (usize, usize),
+    pixel: usize,
+    rotation: i32,
+    target: &mut [u8],
+    target_stride: usize,
+) {
+    if rotation == 0 {
+        for (from, to) in source.chunks(source_stride).zip(target.chunks_mut(target_stride)).take(height) {
+            to[..width * pixel].copy_from_slice(&from[..width * pixel]);
+        }
+        return;
+    }
+    for y in 0..height {
+        for x in 0..width {
+            // Where source (x, y) lands once the picture is turned.
+            let (tx, ty) = match rotation {
+                90 => (height - 1 - y, x),
+                180 => (width - 1 - x, height - 1 - y),
+                _ => (y, width - 1 - x),
+            };
+            let (from, to) = (y * source_stride + x * pixel, ty * target_stride + tx * pixel);
+            target[to..to + pixel].copy_from_slice(&source[from..from + pixel]);
+        }
+    }
+}
+
 /// What a decoder plays.
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(
-    not(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", target_os = "linux"))),
+    not(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", any(target_os = "linux", target_os = "macos", target_os = "windows")))),
     allow(dead_code)
 )]
 enum Source<'a> {
     File(&'a Path),
     /// A Rust reader or Rust-fed HLS, for the FFmpeg backends.
-    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux")))]
+    #[cfg(all(feature = "ffmpeg", any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows")))]
     Ffmpeg(&'a input::Origin),
     // The FFmpeg player, all Linux has, opens files only.
     #[cfg_attr(target_os = "linux", allow(dead_code))]
@@ -501,10 +573,10 @@ enum Source<'a> {
 
 /// Where no decoder exists yet: [`VideoFrames::open`] fails, so no value of
 /// this type is ever made.
-#[cfg(not(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", target_os = "linux"))))]
+#[cfg(not(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", any(target_os = "linux", target_os = "macos", target_os = "windows")))))]
 enum Decoder {}
 
-#[cfg(not(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", target_os = "linux"))))]
+#[cfg(not(any(target_os = "android", target_os = "ios", all(feature = "ffmpeg", any(target_os = "linux", target_os = "macos", target_os = "windows")))))]
 #[allow(clippy::unused_self)]
 impl Decoder {
     fn open(_source: Source, _backend: Backend) -> anyhow::Result<Self> {
@@ -611,6 +683,29 @@ mod tests {
         // BT.709 limited red (63, 102, 240) and BT.601 full-range green (150, 44, 21).
         assert!(close(convert(yuv_to_rgb(true, false), (63., 102., 240.)), [1., 0., 0.]));
         assert!(close(convert(yuv_to_rgb(false, true), (150., 44., 21.)), [0., 1., 0.]));
+    }
+
+    #[test]
+    fn copy_turned_turns_clockwise() {
+        // A 3x2 picture of one-byte pixels, rows 4 bytes apart:
+        //   1 2 3
+        //   4 5 6
+        let source = [1, 2, 3, 0, 4, 5, 6, 0];
+        let turned = |rotation, stride: usize, rows: usize| {
+            let mut target = vec![0; stride * rows];
+            copy_turned(&source, 4, (3, 2), 1, rotation, &mut target, stride);
+            target
+        };
+        assert_eq!(turned(0, 5, 2), [1, 2, 3, 0, 0, 4, 5, 6, 0, 0]);
+        // Clockwise: the left column becomes the top row, read upwards.
+        assert_eq!(turned(90, 2, 3), [4, 1, 5, 2, 6, 3]);
+        assert_eq!(turned(180, 3, 2), [6, 5, 4, 3, 2, 1]);
+        assert_eq!(turned(270, 2, 3), [3, 6, 2, 5, 1, 4]);
+        // Two-byte pixels (a CbCr plane) move whole.
+        let pairs = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut target = [0; 8];
+        copy_turned(&pairs, 4, (2, 2), 2, 90, &mut target, 4);
+        assert_eq!(target, [5, 6, 1, 2, 7, 8, 3, 4]);
     }
 
     #[test]

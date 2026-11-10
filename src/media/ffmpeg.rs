@@ -17,17 +17,18 @@
 //! threads share nothing but the clock.
 
 use super::player::{AudioOutput, AudioSource, VideoOutput, VideoSource};
-#[cfg(any(target_os = "ios", target_os = "linux"))]
+#[cfg(any(target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))]
 use super::player::{play_audio, play_video, AudioSink, Drift, Shared};
-#[cfg(any(target_os = "ios", target_os = "linux"))]
+#[cfg(any(target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))]
 use gpui::{DevicePixels, ImageId, Size};
+#[cfg(any(target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))]
+use std::cell::Cell;
 #[cfg(any(target_os = "ios", target_os = "linux"))]
-use std::cell::{Cell, RefCell};
-#[cfg(any(target_os = "ios", target_os = "linux"))]
+use std::cell::RefCell;
+#[cfg(any(target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::time::Instant;
 use std::time::Duration;
 use super::input::{Opened, Origin};
-use super::planes::Picture;
 use super::Track;
 use anyhow::{anyhow, bail, Context as _, Result};
 use ffmpeg_next as ffmpeg;
@@ -575,13 +576,62 @@ impl Demuxer {
     }
 }
 
+/// A decoded frame waiting for the main thread: a software frame in
+/// [`SOFTWARE`], or a VideoToolbox pixel buffer (iOS, macOS), VA-API surface
+/// (Linux) or Direct3D 11 texture (Windows).
+pub(super) struct Picture {
+    pub frame: ffmpeg::frame::Video,
+    pub timestamp_us: i64,
+}
+
+// SAFETY: the frame owns its buffers and is only read after it moved.
+unsafe impl Send for Picture {}
+
+impl Picture {
+    pub fn new(frame: ffmpeg::frame::Video, timestamp_us: i64) -> Self {
+        Self { frame, timestamp_us }
+    }
+
+    /// The `CVPixelBufferRef` of a VideoToolbox frame, valid while `self` is.
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    pub fn pixel_buffer(&self) -> Option<*mut std::ffi::c_void> {
+        // SAFETY: a VideoToolbox frame keeps its pixel buffer in data[3].
+        (self.frame.format() == ffmpeg::format::Pixel::VIDEOTOOLBOX)
+            .then(|| unsafe { (*self.frame.as_ptr()).data[3].cast() })
+    }
+
+    /// The frame itself when it is a VA-API surface.
+    #[cfg(target_os = "linux")]
+    pub fn vaapi(&self) -> Option<&ffmpeg::frame::Video> {
+        (self.frame.format() == ffmpeg::format::Pixel::VAAPI).then_some(&self.frame)
+    }
+}
+
+/// What software-decoded frames are converted to for the main thread: planes
+/// to upload where wgpu draws; what GPUI's own renderer takes elsewhere (a
+/// full-range BT.601 surface on macOS, a sprite on Windows).
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const SOFTWARE: Pixel = Pixel::YUV420P;
+#[cfg(target_os = "macos")]
+const SOFTWARE: Pixel = Pixel::NV12;
+#[cfg(target_os = "windows")]
+const SOFTWARE: Pixel = Pixel::BGRA;
+
+/// Whether a frame's colours are BT.709: said so, or unsaid and HD.
+pub(super) fn is_bt709(colorspace: ffi::AVColorSpace, height: u32) -> bool {
+    colorspace == ffi::AVColorSpace::AVCOL_SPC_BT709
+        || (colorspace == ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED && height >= 720)
+}
+
 /// Where the platform decoder puts its frames: the reader's window on
 /// Android; VideoToolbox needs nothing; VA-API runs on a render node (the GPU
-/// the window renders with).
+/// the window renders with); Direct3D 11 decodes on the renderer's device.
 #[cfg(target_os = "android")]
 pub(super) type HardwareTarget = *mut ANativeWindow;
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 pub(super) type HardwareTarget = ();
+#[cfg(target_os = "windows")]
+pub(super) type HardwareTarget = windows::Win32::Graphics::Direct3D11::ID3D11Device;
 #[cfg(target_os = "linux")]
 pub(super) type HardwareTarget = std::path::PathBuf;
 
@@ -590,15 +640,14 @@ pub(super) enum Frame {
     /// A MediaCodec output buffer, which renders into the reader.
     #[cfg(target_os = "android")]
     MediaCodec(ffmpeg::frame::Video),
-    /// A frame for the main thread: 8-bit 4:2:0 planes, or a VideoToolbox
-    /// pixel buffer (iOS) or VA-API surface (Linux).
+    /// A frame for the main thread ([`Picture`]).
     Picture(ffmpeg::frame::Video),
 }
 
 pub(super) struct FfmpegVideo {
     demuxer: Demuxer,
     decoder: ffmpeg::decoder::Video,
-    /// Converts software frames that aren't 8-bit 4:2:0 to `yuv420p`.
+    /// Converts software frames to [`SOFTWARE`].
     scaler: Option<ffmpeg::software::scaling::Context>,
     /// Where pictures go to be imported on the main thread.
     slot: Arc<Mutex<Option<Picture>>>,
@@ -642,8 +691,10 @@ impl FfmpegVideo {
             match is_hardware {
                 true if cfg!(target_os = "android") => "MediaCodec into the AImageReader",
                 true if cfg!(target_os = "ios") => "VideoToolbox into BGRA pixel buffers",
+                true if cfg!(target_os = "macos") => "VideoToolbox, pixel buffers drawn as surfaces",
+                true if cfg!(target_os = "windows") => "Direct3D 11 on the renderer's device",
                 true => "VA-API, surfaces imported as DMA-BUFs",
-                false => "software, planes uploaded",
+                false => "software",
             },
         );
         Ok((
@@ -657,8 +708,8 @@ impl FfmpegVideo {
         ))
     }
 
-    /// The frame as 8-bit 4:2:0, no taller than the chosen maximum height.
-    fn yuv420p(&mut self, frame: ffmpeg::frame::Video) -> Result<ffmpeg::frame::Video> {
+    /// The frame in [`SOFTWARE`], no taller than the chosen maximum height.
+    fn software(&mut self, frame: ffmpeg::frame::Video) -> Result<ffmpeg::frame::Video> {
         let max_height = self.demuxer.choices.lock().unwrap_or_else(PoisonError::into_inner).max_height;
         let (width, height) = match max_height {
             Some(max) if frame.height() > max.max(2) => {
@@ -667,7 +718,9 @@ impl FfmpegVideo {
             }
             _ => (frame.width(), frame.height()),
         };
-        if frame.format() == Pixel::YUV420P && height == frame.height() {
+        // Where wgpu draws, the shader takes the planes with any matrix and range.
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        if frame.format() == SOFTWARE && height == frame.height() {
             return Ok(frame);
         }
         // ponytail: 10-bit and 4:4:4 go through swscale to 8-bit 4:2:0; upload
@@ -680,20 +733,51 @@ impl FfmpegVideo {
             {
                 scaler
             }
-            scaler => scaler.insert(ffmpeg::software::scaling::Context::get(
-                frame.format(),
-                frame.width(),
-                frame.height(),
-                Pixel::YUV420P,
-                width,
-                height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            )?),
+            scaler => {
+                let scaler = scaler.insert(ffmpeg::software::scaling::Context::get(
+                    frame.format(),
+                    frame.width(),
+                    frame.height(),
+                    SOFTWARE,
+                    width,
+                    height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                )?);
+                // GPUI's renderers take one fixed form (full-range BT.601 on
+                // macOS, RGB on Windows), so swscale converts from the
+                // stream's matrix and range, which it otherwise guesses.
+                // shortcut: read once per stream; a stream that changes its
+                // colours midway keeps the first ones.
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                // SAFETY: both are live; swscale copies the coefficient tables.
+                unsafe {
+                    let raw = &*frame.as_ptr();
+                    let matrix = if is_bt709(raw.colorspace, frame.height()) {
+                        ffi::SWS_CS_ITU709
+                    } else {
+                        ffi::SWS_CS_ITU601
+                    };
+                    let full = raw.color_range == ffi::AVColorRange::AVCOL_RANGE_JPEG
+                        || matches!(frame.format(), Pixel::YUVJ420P | Pixel::YUVJ422P | Pixel::YUVJ444P);
+                    ffi::sws_setColorspaceDetails(
+                        scaler.as_mut_ptr(),
+                        ffi::sws_getCoefficients(matrix as i32),
+                        full as i32,
+                        ffi::sws_getCoefficients(ffi::SWS_CS_ITU601 as i32),
+                        1,
+                        0,
+                        1 << 16,
+                        1 << 16,
+                    );
+                }
+                scaler
+            }
         };
         let mut converted = ffmpeg::frame::Video::empty();
         scaler.run(&frame, &mut converted)?;
         converted.set_pts(frame.pts());
         // SAFETY: both frames are live; only colour metadata is copied.
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         unsafe {
             (*converted.as_mut_ptr()).colorspace = (*frame.as_ptr()).colorspace;
             (*converted.as_mut_ptr()).color_range = (*frame.as_ptr()).color_range;
@@ -766,24 +850,29 @@ extern "C" fn pick_mediacodec(
 }
 
 /// Opens the native decoder with FFmpeg's VideoToolbox hwaccel.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 fn open_hardware(
     parameters: &ffmpeg::codec::Parameters,
     time_base: ffmpeg::Rational,
     _target: HardwareTarget,
 ) -> Result<ffmpeg::decoder::Video> {
-    use ffmpeg::codec::Id;
-    // FFmpeg requires VideoToolbox's hardware decoder (the simulator has none).
-    let codec_type = match parameters.id() {
-        Id::H264 => *b"avc1",
-        Id::HEVC => *b"hvc1",
-        Id::VP9 => *b"vp09",
-        Id::AV1 => *b"av01",
-        id => bail!("no VideoToolbox decoder for {id:?}"),
-    };
-    // SAFETY: a plain query.
-    if !unsafe { VTIsHardwareDecodeSupported(u32::from_be_bytes(codec_type)) } {
-        bail!("no VideoToolbox hardware decoder for {:?}", parameters.id());
+    // FFmpeg requires VideoToolbox's hardware decoder (the simulator has
+    // none). A Mac's VideoToolbox decodes in software where it must, into the
+    // same pixel buffers.
+    #[cfg(target_os = "ios")]
+    {
+        use ffmpeg::codec::Id;
+        let codec_type = match parameters.id() {
+            Id::H264 => *b"avc1",
+            Id::HEVC => *b"hvc1",
+            Id::VP9 => *b"vp09",
+            Id::AV1 => *b"av01",
+            id => bail!("no VideoToolbox decoder for {id:?}"),
+        };
+        // SAFETY: a plain query.
+        if !unsafe { VTIsHardwareDecodeSupported(u32::from_be_bytes(codec_type)) } {
+            bail!("no VideoToolbox hardware decoder for {:?}", parameters.id());
+        }
     }
     let mut context = ffmpeg::codec::Context::from_parameters(parameters.clone())?;
     // SAFETY: the context is not open yet and takes the device reference.
@@ -802,7 +891,14 @@ fn open_hardware(
             bail!("av_hwdevice_ctx_create(VIDEOTOOLBOX): {}", ffmpeg::Error::from(ret));
         }
         (*raw).hw_device_ctx = device;
-        (*raw).get_format = Some(pick_videotoolbox);
+        #[cfg(target_os = "ios")]
+        {
+            (*raw).get_format = Some(pick_videotoolbox);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            (*raw).get_format = Some(pick_hardware);
+        }
     }
     Ok(context.decoder().video()?)
 }
@@ -855,7 +951,7 @@ extern "C" fn pick_videotoolbox(
 ///
 /// # Safety
 /// `formats` must end in AV_PIX_FMT_NONE.
-#[cfg(any(target_os = "ios", target_os = "linux"))]
+#[cfg(any(target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))]
 unsafe fn first_software(mut formats: *const ffi::AVPixelFormat) -> ffi::AVPixelFormat {
     // SAFETY: the caller vouches for the list.
     unsafe {
@@ -896,15 +992,61 @@ fn open_hardware(
             bail!("av_hwdevice_ctx_create(VAAPI, {render_node:?}): {}", ffmpeg::Error::from(ret));
         }
         (*raw).hw_device_ctx = device;
-        (*raw).get_format = Some(pick_vaapi);
+        (*raw).get_format = Some(pick_hardware);
     }
     Ok(context.decoder().video()?)
 }
 
-/// Picks VA-API when FFmpeg offers it (it does when the GPU decodes the
-/// stream's profile), software otherwise.
+/// Opens the native decoder with FFmpeg's Direct3D 11 hwaccel on `device`,
+/// the one GPUI renders with, so the frames are its textures.
+#[cfg(target_os = "windows")]
+fn open_hardware(
+    parameters: &ffmpeg::codec::Parameters,
+    time_base: ffmpeg::Rational,
+    device: HardwareTarget,
+) -> Result<ffmpeg::decoder::Video> {
+    use windows::core::Interface as _;
+    let mut context = ffmpeg::codec::Context::from_parameters(parameters.clone())?;
+    // SAFETY: the context is not open yet and takes the device reference; the
+    // device context takes the Direct3D device's.
+    unsafe {
+        let raw = context.as_mut_ptr();
+        (*raw).pkt_timebase = time_base.into();
+        let mut reference = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA);
+        if reference.is_null() {
+            bail!("av_hwdevice_ctx_alloc(D3D11VA) failed");
+        }
+        // `AVD3D11VADeviceContext` starts with its `ID3D11Device *`, which
+        // FFmpeg releases with the context; it finds the rest from it.
+        let hwctx = (*((*reference).data as *mut ffi::AVHWDeviceContext)).hwctx as *mut *mut std::ffi::c_void;
+        *hwctx = device.into_raw();
+        let ret = ffi::av_hwdevice_ctx_init(reference);
+        if ret < 0 {
+            ffi::av_buffer_unref(&mut reference);
+            bail!("av_hwdevice_ctx_init(D3D11VA): {}", ffmpeg::Error::from(ret));
+        }
+        (*raw).hw_device_ctx = reference;
+        (*raw).get_format = Some(pick_hardware);
+        // The main thread keeps a texture or two of the decoder's pool: the
+        // picture waiting in the slot and the one being converted.
+        (*raw).extra_hw_frames = 4;
+    }
+    Ok(context.decoder().video()?)
+}
+
+/// The platform decoder's frames: VA-API surfaces, VideoToolbox pixel
+/// buffers, Direct3D 11 textures.
 #[cfg(target_os = "linux")]
-extern "C" fn pick_vaapi(
+const HARDWARE: ffi::AVPixelFormat = ffi::AVPixelFormat::AV_PIX_FMT_VAAPI;
+#[cfg(target_os = "macos")]
+const HARDWARE: ffi::AVPixelFormat = ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX;
+#[cfg(target_os = "windows")]
+const HARDWARE: ffi::AVPixelFormat = ffi::AVPixelFormat::AV_PIX_FMT_D3D11;
+
+/// Picks the platform decoder when FFmpeg offers it (it does when the GPU
+/// decodes the stream's profile), software otherwise.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+extern "C" fn pick_hardware(
     _context: *mut ffi::AVCodecContext,
     formats: *const ffi::AVPixelFormat,
 ) -> ffi::AVPixelFormat {
@@ -912,7 +1054,7 @@ extern "C" fn pick_vaapi(
     unsafe {
         let mut format = formats;
         while *format != ffi::AVPixelFormat::AV_PIX_FMT_NONE {
-            if *format == ffi::AVPixelFormat::AV_PIX_FMT_VAAPI {
+            if *format == HARDWARE {
                 return *format;
             }
             format = format.add(1);
@@ -952,7 +1094,11 @@ impl VideoSource for FfmpegVideo {
                     Pixel::VIDEOTOOLBOX => Frame::Picture(frame),
                     #[cfg(target_os = "linux")]
                     Pixel::VAAPI => Frame::Picture(frame),
-                    _ => Frame::Picture(self.yuv420p(frame)?),
+                    #[cfg(target_os = "macos")]
+                    Pixel::VIDEOTOOLBOX => Frame::Picture(frame),
+                    #[cfg(target_os = "windows")]
+                    Pixel::D3D11 => Frame::Picture(frame),
+                    _ => Frame::Picture(self.software(frame)?),
                 };
                 Ok(VideoOutput::Frame(pts, frame))
             }
@@ -1108,6 +1254,21 @@ impl Rescale for i64 {
     }
 }
 
+/// What a platform on GPUI's own renderer adds to [`FfmpegPlayer`]: where to
+/// decode, how a picture gets to the renderer, and the audio output.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) trait Platform: Default + 'static {
+    type Sink: AudioSink;
+    /// Where to decode in hardware; `None` to decode in software.
+    fn hardware() -> Option<HardwareTarget>;
+    /// Makes `picture`, turned clockwise by `rotation`, what
+    /// [`super::VideoFrames::paint`] draws for `image_id`. Returns how it got
+    /// to the renderer, for the log, and its size.
+    fn present(&self, picture: Picture, rotation: i32, image_id: ImageId) -> Result<(&'static str, (u32, u32))>;
+    fn audio_started() {}
+    fn audio_stopped() {}
+}
+
 /// What a platform adds to [`FfmpegPlayer`]: the window's GPU, the import of
 /// hardware-decoded pictures, and the audio output.
 #[cfg(any(target_os = "ios", target_os = "linux"))]
@@ -1135,7 +1296,7 @@ pub(super) trait Platform: Default + 'static {
 
 /// FFmpeg playing a file on its own threads: video decoded in hardware (or in
 /// software) and audio, both on the shared clock ([`super::player`]).
-#[cfg(any(target_os = "ios", target_os = "linux"))]
+#[cfg(any(target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(super) struct FfmpegPlayer<P: Platform> {
     platform: P,
     size: Size<DevicePixels>,
@@ -1147,20 +1308,29 @@ pub(super) struct FfmpegPlayer<P: Platform> {
     threads: Vec<std::thread::JoinHandle<()>>,
     slot: Arc<Mutex<Option<Picture>>>,
     controls: Controls,
+    #[cfg(any(target_os = "ios", target_os = "linux"))]
     uploader: RefCell<super::planes::Uploader>,
     frames_shown: Cell<u64>,
     last_import: Cell<Option<Instant>>,
     drift: Cell<Drift>,
 }
 
-#[cfg(any(target_os = "ios", target_os = "linux"))]
+#[cfg(any(target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl<P: Platform> FfmpegPlayer<P> {
     pub fn open(source: super::Source, backend: super::Backend) -> Result<Self> {
         let origin = Origin::of(source)?;
         let info = probe(&origin)?;
         let hardware = match backend {
             super::Backend::FfmpegSoftware => None,
+            #[cfg(any(target_os = "ios", target_os = "linux"))]
             _ => P::hardware(P::context().as_ref()),
+            // shortcut: GPUI's own renderers draw frames upright only, so a
+            // turned video decodes in software and is turned as it is copied;
+            // turn on the GPU if phone clips ever stutter.
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            _ if info.rotation != 0 => None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            _ => P::hardware(),
         };
         let slot = Arc::new(Mutex::new(None));
         let choices = Choices::new(&info);
@@ -1219,6 +1389,7 @@ impl<P: Platform> FfmpegPlayer<P> {
             shared,
             threads,
             slot,
+            #[cfg(any(target_os = "ios", target_os = "linux"))]
             uploader: RefCell::new(Default::default()),
             frames_shown: Cell::new(0),
             last_import: Cell::new(None),
@@ -1302,34 +1473,46 @@ impl<P: Platform> FfmpegPlayer<P> {
         Some(&self.controls)
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn platform(&self) -> &P {
+        &self.platform
+    }
+
     /// Imports the newest decoded picture, if there is one, and makes it the
     /// texture drawn for `image_id`.
     pub fn update(&self, image_id: ImageId) -> Result<()> {
         let Some(picture) = self.slot.lock().unwrap_or_else(PoisonError::into_inner).take() else {
             return Ok(());
         };
-        let context = P::context().ok_or_else(|| anyhow!("no GPU context yet"))?;
-        let mut uploader = self.uploader.borrow_mut();
-        let (texture, path) = match self.platform.import(&picture, self.rotation, &mut uploader, &context)? {
-            Some(texture) => (texture, P::IMPORT),
-            None => (
-                uploader.convert(&picture, self.rotation, &context.device, &context.queue)?,
-                "software frame uploaded as planes, converted on the GPU",
-            ),
+        let timestamp_us = picture.timestamp_us;
+        #[cfg(any(target_os = "ios", target_os = "linux"))]
+        let (path, size) = {
+            let context = P::context().ok_or_else(|| anyhow!("no GPU context yet"))?;
+            let mut uploader = self.uploader.borrow_mut();
+            let (texture, path) = match self.platform.import(&picture, self.rotation, &mut uploader, &context)? {
+                Some(texture) => (texture, P::IMPORT),
+                None => (
+                    uploader.convert(&picture, self.rotation, &context.device, &context.queue)?,
+                    "software frame uploaded as planes, converted on the GPU",
+                ),
+            };
+            gpui_wgpu::set_external_texture(image_id, &texture);
+            (path, (texture.width(), texture.height()))
         };
-        gpui_wgpu::set_external_texture(image_id, &texture);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let (path, size) = self.platform.present(picture, self.rotation, image_id)?;
         self.last_import.set(Some(Instant::now()));
         let shown = self.frames_shown.get() + 1;
         self.frames_shown.set(shown);
         if shown == 1 {
-            log::info!("video: {path}, {}x{}", texture.width(), texture.height());
+            log::info!("video: {path}, {}x{}", size.0, size.1);
         }
-        self.shared.record_drift(&self.drift, picture.timestamp_us);
+        self.shared.record_drift(&self.drift, timestamp_us);
         Ok(())
     }
 }
 
-#[cfg(any(target_os = "ios", target_os = "linux"))]
+#[cfg(any(target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl<P: Platform> Drop for FfmpegPlayer<P> {
     fn drop(&mut self) {
         self.shared.update(|state| state.stop = true);

@@ -58,7 +58,8 @@ media = ["dep:image"]
 # Links FFmpeg's shared libraries: the system's on Linux (VA-API decoding);
 # for phones build them with `scripts/build-ffmpeg-android.sh` or
 # `scripts/build-ffmpeg-ios.sh` and set FFMPEG_DIR.
-ffmpeg = ["media", "dep:ffmpeg-next", "dep:cpal", "dep:libc", "dep:gpui_wgpu"]
+ffmpeg = ["media", "dep:ffmpeg-next", "dep:cpal", "dep:libc", "dep:gpui_wgpu", "dep:gpui_windows", "dep:windows",
+          "dep:objc2-core-foundation", "dep:objc2-core-video"]
 
 [lib]
 name = "gpui_mobile"
@@ -110,7 +111,7 @@ smallvec            = { version = "1.6", features = ["union", "const_new"] }
 # font-kit (same registry package as gpui-pre-wgpu)
 font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
 
-[target.'cfg(any(target_os = "android", target_os = "ios", target_os = "linux"))'.dependencies]
+[target.'cfg(any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 # FFmpeg for `media` (feature `ffmpeg`): LGPL shared libraries, no avdevice/avfilter.
 ffmpeg-next = { version = "=9.0.0", optional = true, default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
 
@@ -123,6 +124,23 @@ libc = { version = "0.2", optional = true }
 cpal = { version = "0.16", optional = true }
 # The window's wgpu context and the external-texture hook (`media`).
 gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.11", optional = true }
+
+# ── macOS and Windows (`media` with `ffmpeg`), on GPUI's own renderers ───────
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+libc = { version = "0.2", optional = true }
+cpal = { version = "0.16", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# VideoToolbox's pixel buffers, as `Window::paint_surface` takes them; the versions gpui-pre uses.
+objc2-core-foundation = { version = "0.3.2", optional = true }
+objc2-core-video = { version = "0.3.2", optional = true, features = ["CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn", "CVPixelFormatDescription"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# The window's Direct3D 11 device and the external-texture hook (`media`): the vendored
+# `gpui-pre-windows` (see `[patch.crates-io]`), and the `windows` it uses.
+gpui_windows = { package = "gpui-pre-windows", version = "=0.3.11", optional = true }
+windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common"] }
 
 # ── Android ──────────────────────────────────────────────────────────────────
 
@@ -162,7 +180,7 @@ uuid       = { version = "1", features = ["v5"] }
 gpui = { package = "gpui-pre", version = "=0.3.11", default-features = false, features = ["test-support"] }
 
 # `examples/desktop_video.rs`: a desktop GPUI window.
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dev-dependencies]
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["wayland", "x11"] }
 env_logger = "0.11"
 
@@ -189,3 +207,7 @@ debug     = true
 # must patch it the same way.
 [patch.crates-io]
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
+# `gpui-pre-windows` 0.3.11 with the same external-texture hook in its Direct3D 11
+# atlas and its device handed out (`media` on Windows). `vendor/README.md` has
+# how both are kept up with upstream.
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

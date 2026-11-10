@@ -1,0 +1,665 @@
+diff -ruN gpui-pre-wgpu-0.3.11/Cargo.toml gpui-pre-wgpu-patched/Cargo.toml
+--- gpui-pre-wgpu-0.3.11/Cargo.toml
++++ gpui-pre-wgpu-patched/Cargo.toml
+@@ -38,6 +38,7 @@
+ ]
+ default = []
+ font-kit = ["dep:font-kit"]
++offscreen = ["dep:image"]
+ test-support = [
+     "gpui/test-support",
+     "dep:image",
+@@ -141,6 +142,9 @@
+ [dependencies.unicode-segmentation]
+ version = "1.10"
+ 
++[target.'cfg(target_os = "android")'.dependencies.ash]
++version = "0.38"
++
+ [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
+ version = "30.0.1"
+ features = [
+diff -ruN gpui-pre-wgpu-0.3.11/src/gpui_wgpu.rs gpui-pre-wgpu-patched/src/gpui_wgpu.rs
+--- gpui-pre-wgpu-0.3.11/src/gpui_wgpu.rs
++++ gpui-pre-wgpu-patched/src/gpui_wgpu.rs
+@@ -9,7 +9,12 @@
+ pub use wgpu_context::*;
+ #[cfg(all(
+     not(target_family = "wasm"),
+-    any(test, feature = "bench-support", feature = "test-support")
++    any(
++        test,
++        feature = "bench-support",
++        feature = "test-support",
++        feature = "offscreen"
++    )
+ ))]
+ pub use wgpu_renderer::WgpuHeadlessRenderer;
+ pub use wgpu_renderer::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
+diff -ruN gpui-pre-wgpu-0.3.11/src/wgpu_atlas.rs gpui-pre-wgpu-patched/src/wgpu_atlas.rs
+--- gpui-pre-wgpu-0.3.11/src/wgpu_atlas.rs
++++ gpui-pre-wgpu-patched/src/wgpu_atlas.rs
+@@ -1,12 +1,20 @@
+ // Modified for gpui-pre (snapshot of zed@f816e1f): adapt device queues and sRGB detection to wgpu 30.0.1.
++// Modified for gpui-pre-mobile: external textures drawn in place of an image's tile.
+ use anyhow::{Context as _, Result};
+ use etagere::{BucketedAtlasAllocator, size2};
+ use gpui::{
+     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
+-    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
++    AtlasTile, Bounds, DevicePixels, ImageId, PlatformAtlas, Point, Size, TileId,
+ };
+ use parking_lot::Mutex;
+-use std::{borrow::Cow, ops, sync::Arc};
++use std::{
++    borrow::Cow,
++    ops,
++    sync::{
++        Arc,
++        atomic::{AtomicU64, Ordering},
++    },
++};
+ 
+ use crate::WgpuContext;
+ 
+@@ -23,6 +31,84 @@
+ 
+ pub struct WgpuAtlas(Mutex<AtlasState<WgpuAtlasTextures>>);
+ 
++struct ExternalTexture {
++    image_id: ImageId,
++    view: wgpu::TextureView,
++    size: Size<DevicePixels>,
++    generation: u64,
++}
++
++static EXTERNAL_TEXTURES: Mutex<Vec<ExternalTexture>> = Mutex::new(Vec::new());
++static NEXT_EXTERNAL_GENERATION: AtomicU64 = AtomicU64::new(0);
++
++/// Draws `texture` wherever `image_id` is painted with `Window::paint_image`,
++/// instead of uploading that image's bytes to the atlas.
++///
++/// This lets GPU-resident frames (decoded video, camera) reach the scene
++/// without a CPU copy and without changes to gpui's scene types. The texture
++/// must come from the renderer's device and be sampleable as a color texture
++/// (`Rgba8Unorm`/`Bgra8Unorm`). Calling this again replaces the texture; the
++/// renderer picks the new one up on its next frame.
++pub fn set_external_texture(image_id: ImageId, texture: &wgpu::Texture) {
++    let size = Size {
++        width: DevicePixels(texture.width() as i32),
++        height: DevicePixels(texture.height() as i32),
++    };
++    let external = ExternalTexture {
++        image_id,
++        view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
++        size,
++        generation: NEXT_EXTERNAL_GENERATION.fetch_add(1, Ordering::Relaxed),
++    };
++    let mut textures = EXTERNAL_TEXTURES.lock();
++    match textures.iter_mut().find(|t| t.image_id == image_id) {
++        Some(slot) => *slot = external,
++        None => textures.push(external),
++    }
++}
++
++/// Stops drawing the texture set by [`set_external_texture`] for `image_id`.
++pub fn remove_external_texture(image_id: ImageId) {
++    EXTERNAL_TEXTURES.lock().retain(|t| t.image_id != image_id);
++}
++
++// Counted down from the top of the range so they never meet the atlas's own
++// textures, which are numbered up from zero.
++fn external_texture_id(image_id: ImageId) -> AtlasTextureId {
++    AtlasTextureId {
++        index: u32::MAX - image_id.0 as u32,
++        kind: AtlasTextureKind::Polychrome,
++    }
++}
++
++fn external_tile(key: &AtlasKey) -> Option<AtlasTile> {
++    let AtlasKey::Image(params) = key else {
++        return None;
++    };
++    let textures = EXTERNAL_TEXTURES.lock();
++    let texture = textures.iter().find(|t| t.image_id == params.image_id)?;
++    Some(AtlasTile {
++        texture_id: external_texture_id(texture.image_id),
++        tile_id: TileId(0),
++        padding: 0,
++        bounds: Bounds {
++            origin: Point::default(),
++            size: texture.size,
++        },
++    })
++}
++
++fn external_texture_info(id: AtlasTextureId) -> Option<WgpuTextureInfo> {
++    let textures = EXTERNAL_TEXTURES.lock();
++    let texture = textures
++        .iter()
++        .find(|t| external_texture_id(t.image_id) == id)?;
++    Some(WgpuTextureInfo {
++        view: texture.view.clone(),
++        generation: texture.generation,
++    })
++}
++
+ struct PendingUpload {
+     id: AtlasTextureId,
+     bounds: Bounds<DevicePixels>,
+@@ -81,6 +167,9 @@
+     /// replays a paint from before the image was dropped, so callers must skip
+     /// those sprites rather than assume the texture exists.
+     pub fn get_texture_info(&self, id: AtlasTextureId) -> Option<WgpuTextureInfo> {
++        if let Some(info) = external_texture_info(id) {
++            return Some(info);
++        }
+         let lock = self.0.lock();
+         let texture = lock.backend.storage.get(id)?;
+         Some(WgpuTextureInfo {
+@@ -101,6 +190,8 @@
+     /// Handles device lost by clearing all textures and cached tiles.
+     /// The atlas will lazily recreate textures as needed on subsequent frames.
+     pub fn handle_device_lost(&self, context: &WgpuContext) {
++        // External textures belong to the lost device; their owners register new ones.
++        EXTERNAL_TEXTURES.lock().clear();
+         self.0.lock().clear(|textures| {
+             textures.device = context.device.clone();
+             textures.queue = context.queue.clone();
+@@ -117,6 +208,9 @@
+         key: AtlasKey,
+         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
+     ) -> Result<Option<AtlasTile>> {
++        if let Some(tile) = external_tile(&key) {
++            return Ok(Some(tile));
++        }
+         self.0.lock().get_or_insert_with(key, build)
+     }
+ 
+@@ -548,6 +642,69 @@
+         Ok(())
+     }
+ 
++    #[test]
++    fn external_texture_replaces_image_tile() -> anyhow::Result<()> {
++        let (device, queue) = test_device_and_queue()?;
++        let atlas = WgpuAtlas::new(device.clone(), queue, wgpu::TextureFormat::Bgra8Unorm);
++        let texture = |width| {
++            device.create_texture(&wgpu::TextureDescriptor {
++                label: None,
++                size: wgpu::Extent3d {
++                    width,
++                    height: 4,
++                    depth_or_array_layers: 1,
++                },
++                mip_level_count: 1,
++                sample_count: 1,
++                dimension: wgpu::TextureDimension::D2,
++                format: wgpu::TextureFormat::Rgba8Unorm,
++                usage: wgpu::TextureUsages::TEXTURE_BINDING,
++                view_formats: &[],
++            })
++        };
++        let image_id = ImageId(usize::MAX - 7);
++        let key = AtlasKey::Image(RenderImageParams {
++            image_id,
++            frame_index: 0,
++        });
++        let mut get = || {
++            atlas
++                .get_or_insert_with(key.clone(), &mut || {
++                    Ok(Some((
++                        Size {
++                            width: DevicePixels(1),
++                            height: DevicePixels(1),
++                        },
++                        Cow::Owned(vec![0; 4]),
++                    )))
++                })
++                .expect("lookup should succeed")
++                .expect("callback returns Some")
++        };
++
++        set_external_texture(image_id, &texture(8));
++        let tile = get();
++        assert_eq!(tile.bounds.size.width, DevicePixels(8));
++        let first = atlas
++            .get_texture_info(tile.texture_id)
++            .context("external texture should be served")?
++            .generation;
++        set_external_texture(image_id, &texture(16));
++        let replaced = get();
++        assert_eq!(replaced.texture_id, tile.texture_id);
++        assert_eq!(replaced.bounds.size.width, DevicePixels(16));
++        let second = atlas
++            .get_texture_info(tile.texture_id)
++            .context("replaced texture should be served")?
++            .generation;
++        assert_ne!(first, second);
++
++        remove_external_texture(image_id);
++        assert!(atlas.get_texture_info(tile.texture_id).is_none());
++        assert_eq!(get().bounds.size.width, DevicePixels(1));
++        Ok(())
++    }
++
+     #[test]
+     fn swizzle_upload_data_preserves_bgra_uploads() {
+         let input = vec![0x10, 0x20, 0x30, 0x40];
+diff -ruN gpui-pre-wgpu-0.3.11/src/wgpu_context.rs gpui-pre-wgpu-patched/src/wgpu_context.rs
+--- gpui-pre-wgpu-0.3.11/src/wgpu_context.rs
++++ gpui-pre-wgpu-patched/src/wgpu_context.rs
+@@ -1,4 +1,5 @@
+ // Modified for gpui-pre (snapshot of zed@f816e1f): adapt device queues and sRGB detection to wgpu 30.0.1.
++// Modified for gpui-mobile `media`: DMA-BUF import on Linux, `window_context()`.
+ #[cfg(not(target_family = "wasm"))]
+ use crate::{WgpuRenderer, WgpuSurfaceConfig};
+ #[cfg(not(target_family = "wasm"))]
+@@ -10,6 +11,10 @@
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use wgpu::TextureFormat;
+ 
++/// The last context created for a window; see [`WgpuContext::window_context`].
++#[cfg(not(target_family = "wasm"))]
++static WINDOW_CONTEXT: Mutex<Option<WgpuContext>> = Mutex::new(None);
++
+ #[derive(Clone)]
+ pub struct WgpuContext {
+     pub instance: wgpu::Instance,
+@@ -172,19 +177,43 @@
+                 reject_software,
+             ))?;
+ 
+-        Ok(Self::from_native_adapter_and_device(
++        let context = Self::from_native_adapter_and_device(
+             instance,
+             adapter,
+             device,
+             queue,
+             dual_source_blending,
+             color_texture_format,
+-        ))
++        );
++        *WINDOW_CONTEXT.lock() = Some(context.clone());
++        Ok(context)
++    }
++
++    /// The context windows last rendered with, for code outside the renderer
++    /// that draws into the same device (video frames, `gpui_mobile::media`).
++    /// Textures can't cross devices, so such code must use this one.
++    #[cfg(not(target_family = "wasm"))]
++    pub fn window_context() -> Option<Self> {
++        WINDOW_CONTEXT.lock().clone()
++    }
++
++    /// Unlike [`Self::new_headless`], creates a fresh device from `instance` on every
++    /// call instead of sharing one, since callers choose different backends.
++    #[cfg(all(not(target_family = "wasm"), feature = "offscreen"))]
++    pub(crate) fn new_headless_with_instance(
++        instance: wgpu::Instance,
++    ) -> anyhow::Result<(Self, wgpu::TextureFormat)> {
++        Self::create_headless(instance)
+     }
+ 
+     #[cfg(all(
+         not(target_family = "wasm"),
+-        any(test, feature = "bench-support", feature = "test-support")
++        any(
++            test,
++            feature = "bench-support",
++            feature = "test-support",
++            feature = "offscreen"
++        )
+     ))]
+     pub(crate) fn new_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
+         // Creating a device takes tens of milliseconds, and benchmarks create a headless
+@@ -199,17 +228,21 @@
+         {
+             return Ok((context.clone(), *format));
+         }
+-        let created = Self::create_headless()?;
++        let created = Self::create_headless(Self::instance(None))?;
+         *headless = Some(created.clone());
+         Ok(created)
+     }
+ 
+     #[cfg(all(
+         not(target_family = "wasm"),
+-        any(test, feature = "bench-support", feature = "test-support")
++        any(
++            test,
++            feature = "bench-support",
++            feature = "test-support",
++            feature = "offscreen"
++        )
+     ))]
+-    fn create_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
+-        let instance = Self::instance(None);
++    fn create_headless(instance: wgpu::Instance) -> anyhow::Result<(Self, wgpu::TextureFormat)> {
+         let device_id_filter = Self::device_id_filter();
+         let (adapter, device, queue, dual_source_blending, color_texture_format, target_format) =
+             gpui::block_on(async {
+@@ -272,7 +305,12 @@
+ 
+     #[cfg(all(
+         not(target_family = "wasm"),
+-        any(test, feature = "bench-support", feature = "test-support")
++        any(
++            test,
++            feature = "bench-support",
++            feature = "test-support",
++            feature = "offscreen"
++        )
+     ))]
+     /// Both candidates are 8-bit RGBA-ordered or BGRA-ordered formats: headless readback
+     /// copies rows as 4 bytes per pixel and only swizzles, so no other formats may be added
+@@ -431,6 +469,14 @@
+             .contains(wgpu::Features::DUAL_SOURCE_BLENDING);
+ 
+         let mut required_features = wgpu::Features::empty();
++        // Video frames decoded by VA-API arrive as DMA-BUFs, 10-bit ones as
++        // 16-bit planes (`gpui_mobile::media`).
++        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++        {
++            required_features |= adapter.features()
++                & (wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF
++                    | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
++        }
+         if dual_source_blending {
+             required_features |= wgpu::Features::DUAL_SOURCE_BLENDING;
+         } else {
+@@ -456,6 +502,25 @@
+             .using_resolution(adapter.limits())
+             .using_alignment(adapter.limits());
+ 
++        #[cfg(target_os = "android")]
++        if adapter.get_info().backend == wgpu::Backend::Vulkan {
++            match Self::create_android_vulkan_device(adapter, required_features, &required_limits)
++            {
++                Ok(Some((device, queue))) => {
++                    return Ok((
++                        device,
++                        queue,
++                        dual_source_blending,
++                        color_atlas_texture_format,
++                    ));
++                }
++                Ok(None) => log::info!(
++                    "Vulkan device cannot import AHardwareBuffers; video frames are unavailable"
++                ),
++                Err(error) => log::warn!("Could not enable AHardwareBuffer import: {error:#}"),
++            }
++        }
++
+         let (device, queue) = adapter
+             .request_device(&wgpu::DeviceDescriptor {
+                 label: Some("gpui_device"),
+@@ -476,6 +541,87 @@
+         ))
+     }
+ 
++    /// Opens the Vulkan device with AHardwareBuffer import, foreign queue
++    /// ownership and YCbCr sampling, so decoded video buffers can be sampled
++    /// without a CPU copy. Returns `None` when the GPU lacks any of them.
++    // Ported from zhu0210/zed `gpui_wgpu_backend` (`create_vulkan_device_with_external_sync`).
++    #[cfg(target_os = "android")]
++    fn create_android_vulkan_device(
++        adapter: &wgpu::Adapter,
++        required_features: wgpu::Features,
++        required_limits: &wgpu::Limits,
++    ) -> anyhow::Result<Option<(wgpu::Device, wgpu::Queue)>> {
++        use ash::vk;
++
++        let hardware_buffer = ash::android::external_memory_android_hardware_buffer::NAME;
++        let queue_family_foreign = ash::ext::queue_family_foreign::NAME;
++        // SAFETY: The requested HAL API matches the backend reported by this adapter.
++        let Some(hal_adapter) = (unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }) else {
++            return Ok(None);
++        };
++        let capabilities = hal_adapter.physical_device_capabilities();
++        if !capabilities.supports_extension(hardware_buffer)
++            || !capabilities.supports_extension(queue_family_foreign)
++            || capabilities.properties().api_version < vk::API_VERSION_1_1
++        {
++            return Ok(None);
++        }
++        let mut ycbcr = vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default();
++        let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut ycbcr);
++        // SAFETY: this Vulkan 1.1 adapter owns the physical device, and the
++        // feature output chain contains live, exclusively borrowed storage.
++        unsafe {
++            hal_adapter
++                .shared_instance()
++                .raw_instance()
++                .get_physical_device_features2(hal_adapter.raw_physical_device(), &mut features);
++        }
++        if ycbcr.sampler_ycbcr_conversion != vk::TRUE {
++            return Ok(None);
++        }
++
++        // Must outlive the callback and vkCreateDevice: HAL calls the callback
++        // first and builds its final create-info chain afterwards.
++        let mut ycbcr_features =
++            vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default().sampler_ycbcr_conversion(true);
++        let ycbcr_features = &mut ycbcr_features;
++        let callback: Box<wgpu::hal::vulkan::CreateDeviceCallback<'_>> = Box::new(move |args| {
++            for extension in [hardware_buffer, queue_family_foreign] {
++                if !args.extensions.contains(&extension) {
++                    args.extensions.push(extension);
++                }
++            }
++            // HAL tracks this feature but leaves it out of its device feature
++            // chain, so add it through the callback's pNext extension point.
++            *args.create_info = std::mem::take(args.create_info).push_next(ycbcr_features);
++        });
++        // SAFETY: The HAL adapter belongs to this wgpu adapter and the callback
++        // only enables extensions and a feature its physical device advertises.
++        let hal_device = unsafe {
++            hal_adapter
++                .open_with_callback(
++                    required_features,
++                    required_limits,
++                    &wgpu::MemoryHints::MemoryUsage,
++                    Some(callback),
++                )
++                .map_err(|error| anyhow::anyhow!("opening Vulkan HAL device: {error:?}"))?
++        };
++        let descriptor = wgpu::DeviceDescriptor {
++            label: Some("gpui_device"),
++            required_features,
++            required_limits: required_limits.clone(),
++            memory_hints: wgpu::MemoryHints::MemoryUsage,
++            trace: wgpu::Trace::Off,
++            experimental_features: wgpu::ExperimentalFeatures::disabled(),
++        };
++        // SAFETY: `hal_device` was opened from this adapter with the same
++        // features and limits as `descriptor`.
++        let (device, queue) = unsafe { adapter.create_device_from_hal(hal_device, &descriptor) }
++            .map_err(|error| anyhow::anyhow!("creating Vulkan wgpu device: {error}"))?;
++        Ok(Some((device, queue)))
++    }
++
+     #[cfg(not(target_family = "wasm"))]
+     pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
+         wgpu::Instance::new(wgpu::InstanceDescriptor {
+diff -ruN gpui-pre-wgpu-0.3.11/src/wgpu_renderer.rs gpui-pre-wgpu-patched/src/wgpu_renderer.rs
+--- gpui-pre-wgpu-0.3.11/src/wgpu_renderer.rs
++++ gpui-pre-wgpu-patched/src/wgpu_renderer.rs
+@@ -2313,7 +2313,12 @@
+ 
+ #[cfg(all(
+     not(target_family = "wasm"),
+-    any(test, feature = "bench-support", feature = "test-support")
++    any(
++        test,
++        feature = "bench-support",
++        feature = "test-support",
++        feature = "offscreen"
++    )
+ ))]
+ struct HeadlessRenderTarget {
+     texture: wgpu::Texture,
+@@ -2322,7 +2327,12 @@
+ 
+ #[cfg(all(
+     not(target_family = "wasm"),
+-    any(test, feature = "bench-support", feature = "test-support")
++    any(
++        test,
++        feature = "bench-support",
++        feature = "test-support",
++        feature = "offscreen"
++    )
+ ))]
+ impl HeadlessRenderTarget {
+     fn size(&self) -> Size<DevicePixels> {
+@@ -2335,7 +2345,12 @@
+ 
+ #[cfg(all(
+     not(target_family = "wasm"),
+-    any(test, feature = "bench-support", feature = "test-support")
++    any(
++        test,
++        feature = "bench-support",
++        feature = "test-support",
++        feature = "offscreen"
++    )
+ ))]
+ pub struct WgpuHeadlessRenderer {
+     context: WgpuContext,
+@@ -2346,11 +2361,71 @@
+ 
+ #[cfg(all(
+     not(target_family = "wasm"),
+-    any(test, feature = "bench-support", feature = "test-support")
++    any(
++        test,
++        feature = "bench-support",
++        feature = "test-support",
++        feature = "offscreen"
++    )
+ ))]
+ impl WgpuHeadlessRenderer {
+     pub fn new() -> anyhow::Result<Self> {
+         let (context, target_format) = WgpuContext::new_headless()?;
++        Ok(Self::from_headless_context(context, target_format))
++    }
++
++    /// Creates a renderer on a device from `instance` rather than the default
++    /// Vulkan + GL instance, which has no adapter on iOS: pass a Metal instance there.
++    /// Unlike [`Self::new`], the device is not shared with other renderers.
++    #[cfg(feature = "offscreen")]
++    pub fn with_instance(instance: wgpu::Instance) -> anyhow::Result<Self> {
++        let (context, target_format) = WgpuContext::new_headless_with_instance(instance)?;
++        Ok(Self::from_headless_context(context, target_format))
++    }
++
++    /// Renders `scene` into an offscreen texture of `size` and reads it back.
++    #[cfg(feature = "offscreen")]
++    pub fn render_to_image(
++        &mut self,
++        scene: &Scene,
++        size: Size<DevicePixels>,
++    ) -> anyhow::Result<image::RgbaImage> {
++        self.render(scene, size)?;
++        self.read_image()
++    }
++
++    /// The atlas glyphs and images are rasterized into; a window drawing through
++    /// this renderer must hand it to GPUI as its sprite atlas.
++    #[cfg(feature = "offscreen")]
++    pub fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
++        self.core.atlas.clone()
++    }
++
++    /// The largest width or height, in device pixels, one render can target.
++    #[cfg(feature = "offscreen")]
++    pub fn max_texture_size(&self) -> u32 {
++        self.core.max_texture_size
++    }
++
++    /// Drops the textures sized to the last render (the render target and the path
++    /// intermediates), keeping the device, pipelines and atlas. The next render
++    /// recreates them at its own size.
++    #[cfg(feature = "offscreen")]
++    pub fn release_render_target(&mut self) {
++        self.render_target = None;
++        self.core.resources.invalidate_intermediate_textures();
++    }
++
++    /// Drops every glyph and image tile in [`Self::sprite_atlas`], with the bind
++    /// groups that keep their textures alive. Only call it while no window draws
++    /// through the atlas: tiles such a window already holds would dangle.
++    #[cfg(feature = "offscreen")]
++    pub fn clear_sprite_atlas(&mut self) {
++        self.core.resources.atlas_texture_bind_groups.clear();
++        self.core.atlas.clear();
++    }
++
++    fn from_headless_context(context: WgpuContext, target_format: wgpu::TextureFormat) -> Self {
+         // The device may be shared with earlier renderers; observe only errors raised from
+         // here on, including any while this renderer builds its pipelines.
+         let observed_error_generation = context.errors().current_generation();
+@@ -2362,12 +2437,12 @@
+             wgpu::CompositeAlphaMode::Opaque,
+         );
+ 
+-        Ok(Self {
++        Self {
+             context,
+             core,
+             render_target: None,
+             observed_error_generation,
+-        })
++        }
+     }
+ 
+     fn ensure_render_target(&mut self, size: Size<DevicePixels>) -> anyhow::Result<()> {
+@@ -2772,6 +2847,47 @@
+         Ok(())
+     }
+ 
++    #[cfg(all(target_os = "linux", feature = "offscreen"))]
++    #[test]
++    fn headless_renderer_releases_frame_textures() -> anyhow::Result<()> {
++        let mut renderer = WgpuHeadlessRenderer::new()?;
++        let key = gpui::AtlasKey::Image(gpui::RenderImageParams {
++            image_id: gpui::ImageId(1),
++            frame_index: 0,
++        });
++        let pixel = device_size(1, 1);
++        let mut build = || Ok(Some((pixel, std::borrow::Cow::Owned(vec![0, 0, 0, 255]))));
++        renderer
++            .sprite_atlas()
++            .get_or_insert_with(key.clone(), &mut build)?
++            .expect("tile should be created");
++        let mut scene = Scene::default();
++        scene.insert_primitive(solid_quad(2.0, 2.0, 4.0, 3.0, gpui::red()));
++        scene.finish();
++        renderer.render_to_image(&scene, device_size(13, 7))?;
++        assert!(renderer.render_target.is_some());
++        assert!(renderer.core.resources.path_intermediate_texture.is_some());
++
++        renderer.release_render_target();
++        assert!(renderer.render_target.is_none());
++        assert!(renderer.core.resources.path_intermediate_texture.is_none());
++        assert!(renderer.core.resources.path_msaa_texture.is_none());
++
++        renderer.clear_sprite_atlas();
++        assert!(renderer.core.resources.atlas_texture_bind_groups.is_empty());
++        let mut rebuilt = false;
++        renderer.sprite_atlas().get_or_insert_with(key, &mut || {
++            rebuilt = true;
++            build()
++        })?;
++        assert!(rebuilt, "the cleared atlas should rasterize the tile again");
++
++        // Both are recreated on demand.
++        let image = renderer.render_to_image(&scene, device_size(13, 7))?;
++        assert_pixel(&image, 3, 3, RED);
++        Ok(())
++    }
++
+     #[cfg(target_os = "linux")]
+     #[test]
+     fn headless_renderer_rejects_invalid_sizes() -> anyhow::Result<()> {

@@ -1,5 +1,7 @@
-//! `media::VideoFrames` in a desktop GPUI window (Linux): FFmpeg through
-//! VA-API, DMA-BUF imports, sound through cpal, GPUI drawn over the video.
+//! `media::VideoFrames` in a desktop GPUI window, GPUI drawn over the video,
+//! sound through cpal. Linux: FFmpeg through VA-API, DMA-BUF imports. macOS:
+//! through VideoToolbox, pixel buffers drawn as surfaces. Windows: through
+//! Direct3D 11 on the renderer's device.
 //!
 //! ```sh
 //! cargo run --example desktop_video --features ffmpeg -- [clip|hls] [software|reader]
@@ -10,6 +12,8 @@
 //! forces software decoding; `reader` feeds the clip through `open_reader`. `ZED_DEVICE_ID=0x<pci id>` picks the GPU.
 //! `GPUI_VIDEO_CONTROLS=1` plays at 1.5× with the last audio track and the
 //! first subtitles (try `example/assets/video/tracks.mp4`).
+//! `GPUI_VIDEO_QUIT_AFTER=<seconds>` quits then, failing if no frame was
+//! shown (CI runs it so); `GPUI_VIDEO_MUTED=1` plays without sound.
 
 use gpui::{
     canvas, div, prelude::*, px, rgb, rgba, size, App, Bounds, Context, Corners, Window,
@@ -118,6 +122,7 @@ fn main() {
                 }
                 .expect("opening the clip");
                 video.set_looping(true);
+                video.set_muted(std::env::var("GPUI_VIDEO_MUTED").is_ok_and(|value| value == "1"));
                 if std::env::var("GPUI_VIDEO_CONTROLS").is_ok_and(|value| value == "1") {
                     video.set_rate(1.5);
                     if let Some(track) = video.audio_tracks().last() {
@@ -126,6 +131,18 @@ fn main() {
                     video.set_subtitle_track(video.subtitle_tracks().first().map(|track| track.id));
                 }
                 let player = cx.new(|_| Player { video });
+                if let Some(seconds) = std::env::var("GPUI_VIDEO_QUIT_AFTER").ok().and_then(|value| value.parse().ok()) {
+                    cx.spawn({
+                        let player = player.downgrade();
+                        async move |cx| {
+                            cx.background_executor().timer(Duration::from_secs_f32(seconds)).await;
+                            let shown = player.read_with(cx, |player, _| player.video.frames_shown()).unwrap_or(0);
+                            println!("frames shown: {shown}");
+                            std::process::exit(if shown > 0 { 0 } else { 1 });
+                        }
+                    })
+                    .detach();
+                }
                 // The overlay's text changes as the video plays.
                 cx.spawn({
                     let player = player.downgrade();

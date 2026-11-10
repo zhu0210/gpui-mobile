@@ -1,0 +1,168 @@
+diff -ruN gpui-pre-windows-0.3.11/src/directx_atlas.rs gpui-pre-windows-patched/src/directx_atlas.rs
+--- gpui-pre-windows-0.3.11/src/directx_atlas.rs
++++ gpui-pre-windows-patched/src/directx_atlas.rs
+@@ -1,3 +1,4 @@
++// Modified for gpui-pre-mobile: external textures drawn in place of an image's tile.
+ use etagere::BucketedAtlasAllocator;
+ use parking_lot::Mutex;
+ use windows::Win32::Graphics::{
+@@ -10,11 +11,83 @@
+ 
+ use gpui::{
+     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
+-    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
++    AtlasTile, Bounds, DevicePixels, ImageId, PlatformAtlas, Point, Size, TileId,
+ };
+ 
+ pub(crate) struct DirectXAtlas(Mutex<AtlasState<DirectXAtlasTextures>>);
+ 
++struct ExternalTexture {
++    image_id: ImageId,
++    view: ID3D11ShaderResourceView,
++    size: Size<DevicePixels>,
++}
++
++static EXTERNAL_TEXTURES: Mutex<Vec<ExternalTexture>> = Mutex::new(Vec::new());
++
++/// Draws the texture behind `view` wherever `image_id` is painted with
++/// `Window::paint_image`, instead of uploading that image's bytes to the atlas.
++///
++/// This lets GPU-resident frames (decoded video) reach the scene without a CPU
++/// copy and without changes to gpui's scene types. The view must come from the
++/// renderer's device ([`crate::directx_device`]) and show a `size` color
++/// texture (`B8G8R8A8_UNORM`). Calling this again replaces the view; the
++/// renderer picks the new one up on its next frame.
++pub fn set_external_texture(
++    image_id: ImageId,
++    view: &ID3D11ShaderResourceView,
++    size: Size<DevicePixels>,
++) {
++    let external = ExternalTexture {
++        image_id,
++        view: view.clone(),
++        size,
++    };
++    let mut textures = EXTERNAL_TEXTURES.lock();
++    match textures.iter_mut().find(|t| t.image_id == image_id) {
++        Some(slot) => *slot = external,
++        None => textures.push(external),
++    }
++}
++
++/// Stops drawing the texture set by [`set_external_texture`] for `image_id`.
++pub fn remove_external_texture(image_id: ImageId) {
++    EXTERNAL_TEXTURES.lock().retain(|t| t.image_id != image_id);
++}
++
++// Counted down from the top of the range so they never meet the atlas's own
++// textures, which are numbered up from zero.
++fn external_texture_id(image_id: ImageId) -> AtlasTextureId {
++    AtlasTextureId {
++        index: u32::MAX - image_id.0 as u32,
++        kind: AtlasTextureKind::Polychrome,
++    }
++}
++
++fn external_tile(key: &AtlasKey) -> Option<AtlasTile> {
++    let AtlasKey::Image(params) = key else {
++        return None;
++    };
++    let textures = EXTERNAL_TEXTURES.lock();
++    let texture = textures.iter().find(|t| t.image_id == params.image_id)?;
++    Some(AtlasTile {
++        texture_id: external_texture_id(texture.image_id),
++        tile_id: TileId(0),
++        padding: 0,
++        bounds: Bounds {
++            origin: Point::default(),
++            size: texture.size,
++        },
++    })
++}
++
++fn external_texture_view(id: AtlasTextureId) -> Option<ID3D11ShaderResourceView> {
++    let textures = EXTERNAL_TEXTURES.lock();
++    let texture = textures
++        .iter()
++        .find(|t| external_texture_id(t.image_id) == id)?;
++    Some(texture.view.clone())
++}
++
+ struct DirectXAtlasTextures {
+     device: ID3D11Device,
+     device_context: ID3D11DeviceContext,
+@@ -51,6 +124,9 @@
+         &self,
+         id: AtlasTextureId,
+     ) -> Option<[Option<ID3D11ShaderResourceView>; 1]> {
++        if let Some(view) = external_texture_view(id) {
++            return Some([Some(view)]);
++        }
+         let lock = self.0.lock();
+         let texture = lock.backend.texture(id)?;
+         Some(texture.view.clone())
+@@ -61,6 +137,8 @@
+         device: &ID3D11Device,
+         device_context: &ID3D11DeviceContext,
+     ) {
++        // External textures belong to the lost device; their owners register new ones.
++        EXTERNAL_TEXTURES.lock().clear();
+         let mut lock = self.0.lock();
+         lock.clear(|textures| {
+             textures.device = device.clone();
+@@ -80,6 +158,9 @@
+             Option<(Size<DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
+         >,
+     ) -> anyhow::Result<Option<AtlasTile>> {
++        if let Some(tile) = external_tile(&key) {
++            return Ok(Some(tile));
++        }
+         self.0.lock().get_or_insert_with(key, build)
+     }
+ 
+diff -ruN gpui-pre-windows-0.3.11/src/directx_devices.rs gpui-pre-windows-patched/src/directx_devices.rs
+--- gpui-pre-windows-0.3.11/src/directx_devices.rs
++++ gpui-pre-windows-patched/src/directx_devices.rs
+@@ -1,3 +1,4 @@
++// Modified for gpui-pre-mobile: the renderer's device, for whoever makes external textures.
+ use anyhow::{Context, Result};
+ use gpui_util::ResultExt;
+ use itertools::Itertools;
+@@ -35,6 +36,15 @@
+         .context("DirectXRenderer failed to recover from lost device after multiple attempts")
+ }
+ 
++static DEVICE: parking_lot::Mutex<Option<ID3D11Device>> = parking_lot::Mutex::new(None);
++
++/// The Direct3D 11 device every window renders with, once the platform has
++/// made it; a new one after a device loss. Textures for
++/// [`crate::set_external_texture`] must come from it.
++pub fn directx_device() -> Option<ID3D11Device> {
++    DEVICE.lock().clone()
++}
++
+ #[derive(Clone)]
+ pub(crate) struct DirectXDevices {
+     pub(crate) adapter: IDXGIAdapter1,
+@@ -63,6 +73,7 @@
+             _ => unreachable!(),
+         }
+ 
++        *DEVICE.lock() = Some(device.clone());
+         Ok(Self {
+             adapter,
+             dxgi_factory,
+diff -ruN gpui-pre-windows-0.3.11/src/gpui_windows.rs gpui-pre-windows-patched/src/gpui_windows.rs
+--- gpui-pre-windows-0.3.11/src/gpui_windows.rs
++++ gpui-pre-windows-patched/src/gpui_windows.rs
+@@ -38,6 +38,10 @@
+ pub(crate) use window::*;
+ pub(crate) use wrapper::*;
+ 
++// gpui-pre-mobile: video frames drawn as images (`gpui_mobile::media`).
++pub use directx_atlas::{remove_external_texture, set_external_texture};
++pub use directx_devices::directx_device;
++
+ pub use platform::WindowsPlatform;
+ 
+ pub(crate) use windows::Win32::Foundation::HWND;

@@ -23,6 +23,7 @@ const HOLD_TIMEOUT: Duration = Duration::from_millis(500);
 /// ahead and jumping back.
 const HEARD_SLACK_NS: i64 = 200_000_000;
 
+#[cfg(not(target_os = "windows"))]
 pub(super) fn monotonic_ns() -> i64 {
     let mut time = libc::timespec {
         tv_sec: 0,
@@ -31,6 +32,13 @@ pub(super) fn monotonic_ns() -> i64 {
     // SAFETY: writes into local storage.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
     time.tv_sec * 1_000_000_000 + time.tv_nsec
+}
+
+/// Nanoseconds on a monotonic clock, as [`Instant`] counts them.
+#[cfg(target_os = "windows")]
+pub(super) fn monotonic_ns() -> i64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos() as i64
 }
 
 /// Playback state shared by the UI, video and audio threads.

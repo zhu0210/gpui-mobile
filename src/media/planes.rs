@@ -9,35 +9,7 @@ use anyhow::{anyhow, Result};
 use gpui_wgpu::wgpu;
 use std::sync::Arc;
 
-/// A decoded frame waiting for the main thread: 8-bit 4:2:0 planes, or a
-/// VideoToolbox pixel buffer (iOS) or VA-API surface (Linux).
-pub(super) struct Picture {
-    pub frame: ffmpeg_next::frame::Video,
-    pub timestamp_us: i64,
-}
-
-// SAFETY: the frame owns its buffers and is only read after it moved.
-unsafe impl Send for Picture {}
-
-impl Picture {
-    pub fn new(frame: ffmpeg_next::frame::Video, timestamp_us: i64) -> Self {
-        Self { frame, timestamp_us }
-    }
-
-    /// The `CVPixelBufferRef` of a VideoToolbox frame, valid while `self` is.
-    #[cfg(target_os = "ios")]
-    pub fn pixel_buffer(&self) -> Option<*mut std::ffi::c_void> {
-        // SAFETY: a VideoToolbox frame keeps its pixel buffer in data[3].
-        (self.frame.format() == ffmpeg_next::format::Pixel::VIDEOTOOLBOX)
-            .then(|| unsafe { (*self.frame.as_ptr()).data[3].cast() })
-    }
-
-    /// The frame itself when it is a VA-API surface.
-    #[cfg(target_os = "linux")]
-    pub fn vaapi(&self) -> Option<&ffmpeg_next::frame::Video> {
-        (self.frame.format() == ffmpeg_next::format::Pixel::VAAPI).then_some(&self.frame)
-    }
-}
+pub(super) use super::ffmpeg::Picture;
 
 const PLANES_SHADER: &str = r#"
 struct Params { map_s: vec4<f32>, map_t: vec4<f32>, range: vec4<f32>, r: vec4<f32>, g: vec4<f32>, b: vec4<f32> };
