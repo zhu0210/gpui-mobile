@@ -209,8 +209,7 @@ fn conversion(frame: &ffmpeg_next::frame::Video, rotation: i32, ten_bit: bool) -
         (raw.colorspace, raw.color_range)
     };
     let mut colour = super::yuv_to_rgb(
-        colorspace == ffmpeg_next::ffi::AVColorSpace::AVCOL_SPC_BT709
-            || (colorspace == ffmpeg_next::ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED && height >= 720),
+        super::ffmpeg::is_bt709(colorspace, height),
         range == ffmpeg_next::ffi::AVColorRange::AVCOL_RANGE_JPEG,
     );
     if ten_bit {

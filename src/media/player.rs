@@ -646,10 +646,13 @@ mod tests {
         let stalled = shared.position_us();
         assert!((HEARD_SLACK_NS / 1000..HEARD_SLACK_NS / 1000 + 20_000).contains(&stalled), "at {stalled} µs");
         // The sound comes again: the clock follows it from there.
+        // (Measured against the time that really passed: a busy machine oversleeps.)
+        let synced = Instant::now();
         shared.sync(generation, 250_000, monotonic_ns());
         std::thread::sleep(Duration::from_millis(50));
-        let resumed = shared.position_us();
-        assert!((290_000..330_000).contains(&resumed), "at {resumed} µs");
+        let resumed = shared.position_us() - 250_000;
+        let passed = synced.elapsed().as_micros() as i64;
+        assert!((passed - 20_000..passed + 20_000).contains(&resumed), "{resumed} µs on in {passed} µs");
     }
 
     #[test]
@@ -657,9 +660,11 @@ mod tests {
         let shared = Shared::new(false);
         shared.update(|state| state.holding = false);
         shared.set_rate(2.0);
-        let start = shared.position_us();
+        let (started, start) = (Instant::now(), shared.position_us());
         std::thread::sleep(Duration::from_millis(100));
         let moved = shared.position_us() - start;
-        assert!((190_000..260_000).contains(&moved), "moved {moved} µs");
+        // Twice the time that really passed: a busy machine oversleeps.
+        let passed = started.elapsed().as_micros() as i64;
+        assert!((2 * passed - 30_000..2 * passed + 30_000).contains(&moved), "moved {moved} µs in {passed} µs");
     }
 }

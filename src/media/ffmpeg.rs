@@ -648,7 +648,10 @@ pub(super) struct FfmpegVideo {
     demuxer: Demuxer,
     decoder: ffmpeg::decoder::Video,
     /// Converts software frames to [`SOFTWARE`].
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     scaler: Option<ffmpeg::software::scaling::Context>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    scaler: Scaler,
     /// Where pictures go to be imported on the main thread.
     slot: Arc<Mutex<Option<Picture>>>,
 }
@@ -701,7 +704,7 @@ impl FfmpegVideo {
             Self {
                 demuxer,
                 decoder,
-                scaler: None,
+                scaler: Default::default(),
                 slot,
             },
             is_hardware,
@@ -718,23 +721,32 @@ impl FfmpegVideo {
             }
             _ => (frame.width(), frame.height()),
         };
+        // GPUI's own renderers take one fixed form, so swscale converts to it
+        // from the stream's matrix and range.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        return self.scaler.convert(
+            frame,
+            (width, height),
+            SOFTWARE,
+            if cfg!(target_os = "macos") { ffi::AVColorSpace::AVCOL_SPC_SMPTE170M } else { ffi::AVColorSpace::AVCOL_SPC_RGB },
+        );
         // Where wgpu draws, the shader takes the planes with any matrix and range.
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        if frame.format() == SOFTWARE && height == frame.height() {
-            return Ok(frame);
-        }
-        // ponytail: 10-bit and 4:4:4 go through swscale to 8-bit 4:2:0; upload
-        // them natively if the software path ever matters for them.
-        let scaler = match &mut self.scaler {
-            Some(scaler)
-                if scaler.input().format == frame.format()
-                    && (scaler.input().width, scaler.input().height) == (frame.width(), frame.height())
-                    && (scaler.output().width, scaler.output().height) == (width, height) =>
-            {
-                scaler
+        {
+            if frame.format() == SOFTWARE && height == frame.height() {
+                return Ok(frame);
             }
-            scaler => {
-                let scaler = scaler.insert(ffmpeg::software::scaling::Context::get(
+            // ponytail: 10-bit and 4:4:4 go through swscale to 8-bit 4:2:0; upload
+            // them natively if the software path ever matters for them.
+            let scaler = match &mut self.scaler {
+                Some(scaler)
+                    if scaler.input().format == frame.format()
+                        && (scaler.input().width, scaler.input().height) == (frame.width(), frame.height())
+                        && (scaler.output().width, scaler.output().height) == (width, height) =>
+                {
+                    scaler
+                }
+                scaler => scaler.insert(ffmpeg::software::scaling::Context::get(
                     frame.format(),
                     frame.width(),
                     frame.height(),
@@ -742,47 +754,96 @@ impl FfmpegVideo {
                     width,
                     height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
-                )?);
-                // GPUI's renderers take one fixed form (full-range BT.601 on
-                // macOS, RGB on Windows), so swscale converts from the
-                // stream's matrix and range, which it otherwise guesses.
-                // shortcut: read once per stream; a stream that changes its
-                // colours midway keeps the first ones.
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
-                // SAFETY: both are live; swscale copies the coefficient tables.
-                unsafe {
-                    let raw = &*frame.as_ptr();
-                    let matrix = if is_bt709(raw.colorspace, frame.height()) {
-                        ffi::SWS_CS_ITU709
-                    } else {
-                        ffi::SWS_CS_ITU601
-                    };
-                    let full = raw.color_range == ffi::AVColorRange::AVCOL_RANGE_JPEG
-                        || matches!(frame.format(), Pixel::YUVJ420P | Pixel::YUVJ422P | Pixel::YUVJ444P);
-                    ffi::sws_setColorspaceDetails(
-                        scaler.as_mut_ptr(),
-                        ffi::sws_getCoefficients(matrix as i32),
-                        full as i32,
-                        ffi::sws_getCoefficients(ffi::SWS_CS_ITU601 as i32),
-                        1,
-                        0,
-                        1 << 16,
-                        1 << 16,
-                    );
-                }
-                scaler
+                )?),
+            };
+            let mut converted = ffmpeg::frame::Video::empty();
+            scaler.run(&frame, &mut converted)?;
+            converted.set_pts(frame.pts());
+            // SAFETY: both frames are live; only the time the picture is
+            // filed under and colour metadata are copied.
+            unsafe {
+                (*converted.as_mut_ptr()).best_effort_timestamp = (*frame.as_ptr()).best_effort_timestamp;
+                (*converted.as_mut_ptr()).colorspace = (*frame.as_ptr()).colorspace;
+                (*converted.as_mut_ptr()).color_range = (*frame.as_ptr()).color_range;
             }
-        };
-        let mut converted = ffmpeg::frame::Video::empty();
-        scaler.run(&frame, &mut converted)?;
-        converted.set_pts(frame.pts());
-        // SAFETY: both frames are live; only colour metadata is copied.
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        unsafe {
-            (*converted.as_mut_ptr()).colorspace = (*frame.as_ptr()).colorspace;
-            (*converted.as_mut_ptr()).color_range = (*frame.as_ptr()).color_range;
+            Ok(converted)
         }
+    }
+}
+
+/// swscale converting software frames to what GPUI's own renderer draws:
+/// full-range BT.601 NV12 (macOS) or BGRA (Windows), from the frame's own
+/// matrix and range. Through `sws_scale_frame`, which takes those from the
+/// frames (FFmpeg 7.1 on); the older calls leave the range alone between two
+/// YUV formats of one size.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+struct Scaler(*mut ffi::SwsContext);
+
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+impl Default for Scaler {
+    fn default() -> Self {
+        Self(std::ptr::null_mut())
+    }
+}
+
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+impl Scaler {
+    /// `frame` as `format`, `width`×`height`, full range, in `colorspace`.
+    fn convert(
+        &mut self,
+        mut frame: ffmpeg::frame::Video,
+        (width, height): (u32, u32),
+        format: Pixel,
+        colorspace: ffi::AVColorSpace,
+    ) -> Result<ffmpeg::frame::Video> {
+        let mut converted = ffmpeg::frame::Video::empty();
+        // SAFETY: both frames are live and the context is this scaler's own;
+        // swscale allocates the target's buffers.
+        unsafe {
+            if self.0.is_null() {
+                self.0 = ffi::sws_alloc_context();
+                if self.0.is_null() {
+                    bail!("sws_alloc_context failed");
+                }
+                ffi::av_opt_set_int(self.0.cast(), c"sws_flags".as_ptr(), 2, 0); // SWS_BILINEAR
+            }
+            // What the stream leaves unsaid, said the way decoders mean it.
+            let source = frame.as_mut_ptr();
+            if (*source).colorspace == ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED {
+                (*source).colorspace = if is_bt709((*source).colorspace, (*source).height as u32) {
+                    ffi::AVColorSpace::AVCOL_SPC_BT709
+                } else {
+                    ffi::AVColorSpace::AVCOL_SPC_SMPTE170M
+                };
+            }
+            if (*source).color_range == ffi::AVColorRange::AVCOL_RANGE_UNSPECIFIED {
+                let full = matches!(frame.format(), Pixel::YUVJ420P | Pixel::YUVJ422P | Pixel::YUVJ444P);
+                (*source).color_range =
+                    if full { ffi::AVColorRange::AVCOL_RANGE_JPEG } else { ffi::AVColorRange::AVCOL_RANGE_MPEG };
+            }
+            let target = converted.as_mut_ptr();
+            (*target).format = ffi::AVPixelFormat::from(format) as i32;
+            (*target).width = width as i32;
+            (*target).height = height as i32;
+            (*target).color_range = ffi::AVColorRange::AVCOL_RANGE_JPEG;
+            (*target).colorspace = colorspace;
+            let ret = ffi::sws_scale_frame(self.0, target, source);
+            if ret < 0 {
+                bail!("sws_scale_frame to {format:?}: {}", ffmpeg::Error::from(ret));
+            }
+            // The time the picture is filed under.
+            (*target).best_effort_timestamp = (*source).best_effort_timestamp;
+        }
+        converted.set_pts(frame.pts());
         Ok(converted)
+    }
+}
+
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+impl Drop for Scaler {
+    fn drop(&mut self) {
+        // SAFETY: the context this owns, or null.
+        unsafe { ffi::sws_freeContext(self.0) };
     }
 }
 
@@ -1544,6 +1605,49 @@ mod tests {
     fn ass_lines_become_plain_text() {
         assert_eq!(ass_text(r"0,0,Default,,0,0,0,,{\i1}Styled, with commas{\i0}\NNext\hrow"), "Styled, with commas\nNext row");
         assert_eq!(ass_text("3,0,Default,,0,0,0,,plain"), "plain");
+    }
+
+    /// A 4x4 limited-range 4:2:0 frame of one colour, BT.709 or BT.601.
+    fn flat(bt709: bool, (y, cb, cr): (u8, u8, u8)) -> ffmpeg::frame::Video {
+        let mut frame = ffmpeg::frame::Video::new(Pixel::YUV420P, 4, 4);
+        for (plane, value) in [(0, y), (1, cb), (2, cr)] {
+            frame.data_mut(plane).fill(value);
+        }
+        // SAFETY: plain colour fields of a frame this owns.
+        unsafe {
+            (*frame.as_mut_ptr()).colorspace =
+                if bt709 { ffi::AVColorSpace::AVCOL_SPC_BT709 } else { ffi::AVColorSpace::AVCOL_SPC_SMPTE170M };
+            (*frame.as_mut_ptr()).color_range = ffi::AVColorRange::AVCOL_RANGE_MPEG;
+        }
+        frame
+    }
+
+    /// What GPUI's own renderers are given of software frames: macOS's
+    /// full-range BT.601 NV12 and Windows's BGRA, whatever the stream's
+    /// matrix and range.
+    #[test]
+    fn software_frames_are_converted_from_their_matrix_and_range() {
+        let close = |a: &[u8], b: &[u8]| a.iter().zip(b).all(|(a, b)| a.abs_diff(*b) <= 3);
+        let mut scaler = Scaler::default();
+        let mut nv12 = |frame| {
+            let converted = scaler.convert(frame, (4, 4), Pixel::NV12, ffi::AVColorSpace::AVCOL_SPC_SMPTE170M).unwrap();
+            assert_eq!(converted.format(), Pixel::NV12);
+            [converted.data(0)[0], converted.data(1)[0], converted.data(1)[1]]
+        };
+        // Limited-range black and white open up to the full range.
+        assert!(close(&nv12(flat(false, (16, 128, 128))), &[0, 128, 128]));
+        assert!(close(&nv12(flat(true, (235, 128, 128))), &[255, 128, 128]));
+        // BT.709 limited red (63, 102, 240) is full-range BT.601 red (76, 85, 255).
+        assert!(close(&nv12(flat(true, (63, 102, 240))), &[76, 85, 255]));
+        let mut scaler = Scaler::default();
+        let mut bgra = |frame| {
+            let converted = scaler.convert(frame, (4, 4), Pixel::BGRA, ffi::AVColorSpace::AVCOL_SPC_RGB).unwrap();
+            converted.data(0)[..4].to_vec()
+        };
+        assert!(close(&bgra(flat(true, (63, 102, 240))), &[0, 0, 255, 255]));
+        // BT.601 limited green (145, 54, 34).
+        assert!(close(&bgra(flat(false, (145, 54, 34))), &[0, 255, 0, 255]));
+        assert!(close(&bgra(flat(false, (16, 128, 128))), &[0, 0, 0, 255]));
     }
 
     #[test]
