@@ -140,7 +140,7 @@ objc2-core-video = { version = "0.3.2", optional = true, features = ["CVBuffer",
 # The window's Direct3D 11 device and the external-texture hook (`media`): the vendored
 # `gpui-pre-windows` (see `[patch.crates-io]`), and the `windows` it uses.
 gpui_windows = { package = "gpui-pre-windows", version = "=0.3.11", optional = true }
-windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common"] }
+windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_System_Com"] }
 
 # ── Android ──────────────────────────────────────────────────────────────────
 

@@ -44,6 +44,17 @@ impl Ring {
 
 impl AudioSink for Cpal {
     fn open(rate: i32, channels: i32) -> Result<Self> {
+        // cpal keeps one device enumerator for the process, but COM only for each thread that
+        // uses it: when the last of those ends, Windows unloads the audio library from under
+        // the enumerator, and the next player to ask for a device crashes. This keeps COM,
+        // and the library with it, for the process.
+        #[cfg(target_os = "windows")]
+        {
+            static KEPT: std::sync::Once = std::sync::Once::new();
+            KEPT.call_once(|| {
+                let _ = unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() };
+            });
+        }
         let device = cpal::default_host()
             .default_output_device()
             .ok_or_else(|| anyhow!("no audio output device"))?;
