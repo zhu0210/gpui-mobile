@@ -1,5 +1,5 @@
-diff -ruN gpui-pre-wgpu-0.3.11/Cargo.toml gpui-pre-wgpu-patched/Cargo.toml
---- gpui-pre-wgpu-0.3.11/Cargo.toml
+diff -ruN gpui-pre-wgpu-0.3.12/Cargo.toml gpui-pre-wgpu-patched/Cargo.toml
+--- gpui-pre-wgpu-0.3.12/Cargo.toml
 +++ gpui-pre-wgpu-patched/Cargo.toml
 @@ -38,6 +38,7 @@
  ]
@@ -19,8 +19,8 @@ diff -ruN gpui-pre-wgpu-0.3.11/Cargo.toml gpui-pre-wgpu-patched/Cargo.toml
  [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
  version = "30.0.1"
  features = [
-diff -ruN gpui-pre-wgpu-0.3.11/src/gpui_wgpu.rs gpui-pre-wgpu-patched/src/gpui_wgpu.rs
---- gpui-pre-wgpu-0.3.11/src/gpui_wgpu.rs
+diff -ruN gpui-pre-wgpu-0.3.12/src/gpui_wgpu.rs gpui-pre-wgpu-patched/src/gpui_wgpu.rs
+--- gpui-pre-wgpu-0.3.12/src/gpui_wgpu.rs
 +++ gpui-pre-wgpu-patched/src/gpui_wgpu.rs
 @@ -9,7 +9,12 @@
  pub use wgpu_context::*;
@@ -36,11 +36,11 @@ diff -ruN gpui-pre-wgpu-0.3.11/src/gpui_wgpu.rs gpui-pre-wgpu-patched/src/gpui_w
  ))]
  pub use wgpu_renderer::WgpuHeadlessRenderer;
  pub use wgpu_renderer::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
-diff -ruN gpui-pre-wgpu-0.3.11/src/wgpu_atlas.rs gpui-pre-wgpu-patched/src/wgpu_atlas.rs
---- gpui-pre-wgpu-0.3.11/src/wgpu_atlas.rs
+diff -ruN gpui-pre-wgpu-0.3.12/src/wgpu_atlas.rs gpui-pre-wgpu-patched/src/wgpu_atlas.rs
+--- gpui-pre-wgpu-0.3.12/src/wgpu_atlas.rs
 +++ gpui-pre-wgpu-patched/src/wgpu_atlas.rs
 @@ -1,12 +1,20 @@
- // Modified for gpui-pre (snapshot of zed@f816e1f): adapt device queues and sRGB detection to wgpu 30.0.1.
+ // Modified for gpui-pre (snapshot of zed@d2a4fb6): adapt device queues and sRGB detection to wgpu 30.0.1.
 +// Modified for gpui-pre-mobile: external textures drawn in place of an image's tile.
  use anyhow::{Context as _, Result};
  use etagere::{BucketedAtlasAllocator, size2};
@@ -246,11 +246,11 @@ diff -ruN gpui-pre-wgpu-0.3.11/src/wgpu_atlas.rs gpui-pre-wgpu-patched/src/wgpu_
      #[test]
      fn swizzle_upload_data_preserves_bgra_uploads() {
          let input = vec![0x10, 0x20, 0x30, 0x40];
-diff -ruN gpui-pre-wgpu-0.3.11/src/wgpu_context.rs gpui-pre-wgpu-patched/src/wgpu_context.rs
---- gpui-pre-wgpu-0.3.11/src/wgpu_context.rs
+diff -ruN gpui-pre-wgpu-0.3.12/src/wgpu_context.rs gpui-pre-wgpu-patched/src/wgpu_context.rs
+--- gpui-pre-wgpu-0.3.12/src/wgpu_context.rs
 +++ gpui-pre-wgpu-patched/src/wgpu_context.rs
 @@ -1,4 +1,5 @@
- // Modified for gpui-pre (snapshot of zed@f816e1f): adapt device queues and sRGB detection to wgpu 30.0.1.
+ // Modified for gpui-pre (snapshot of zed@d2a4fb6): adapt device queues and sRGB detection to wgpu 30.0.1.
 +// Modified for gpui-mobile `media`: DMA-BUF import on Linux, `window_context()`.
  #[cfg(not(target_family = "wasm"))]
  use crate::{WgpuRenderer, WgpuSurfaceConfig};
@@ -482,8 +482,8 @@ diff -ruN gpui-pre-wgpu-0.3.11/src/wgpu_context.rs gpui-pre-wgpu-patched/src/wgp
      #[cfg(not(target_family = "wasm"))]
      pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
          wgpu::Instance::new(wgpu::InstanceDescriptor {
-diff -ruN gpui-pre-wgpu-0.3.11/src/wgpu_renderer.rs gpui-pre-wgpu-patched/src/wgpu_renderer.rs
---- gpui-pre-wgpu-0.3.11/src/wgpu_renderer.rs
+diff -ruN gpui-pre-wgpu-0.3.12/src/wgpu_renderer.rs gpui-pre-wgpu-patched/src/wgpu_renderer.rs
+--- gpui-pre-wgpu-0.3.12/src/wgpu_renderer.rs
 +++ gpui-pre-wgpu-patched/src/wgpu_renderer.rs
 @@ -2313,7 +2313,12 @@
  

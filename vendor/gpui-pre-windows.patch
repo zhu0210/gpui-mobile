@@ -1,5 +1,5 @@
-diff -ruN gpui-pre-windows-0.3.11/src/directx_atlas.rs gpui-pre-windows-patched/src/directx_atlas.rs
---- gpui-pre-windows-0.3.11/src/directx_atlas.rs
+diff -ruN gpui-pre-windows-0.3.12/src/directx_atlas.rs gpui-pre-windows-patched/src/directx_atlas.rs
+--- gpui-pre-windows-0.3.12/src/directx_atlas.rs
 +++ gpui-pre-windows-patched/src/directx_atlas.rs
 @@ -1,3 +1,4 @@
 +// Modified for gpui-pre-mobile: external textures drawn in place of an image's tile.
@@ -120,8 +120,8 @@ diff -ruN gpui-pre-windows-0.3.11/src/directx_atlas.rs gpui-pre-windows-patched/
          self.0.lock().get_or_insert_with(key, build)
      }
  
-diff -ruN gpui-pre-windows-0.3.11/src/directx_devices.rs gpui-pre-windows-patched/src/directx_devices.rs
---- gpui-pre-windows-0.3.11/src/directx_devices.rs
+diff -ruN gpui-pre-windows-0.3.12/src/directx_devices.rs gpui-pre-windows-patched/src/directx_devices.rs
+--- gpui-pre-windows-0.3.12/src/directx_devices.rs
 +++ gpui-pre-windows-patched/src/directx_devices.rs
 @@ -1,3 +1,4 @@
 +// Modified for gpui-pre-mobile: the renderer's device, for whoever makes external textures.
@@ -152,8 +152,8 @@ diff -ruN gpui-pre-windows-0.3.11/src/directx_devices.rs gpui-pre-windows-patche
          Ok(Self {
              adapter,
              dxgi_factory,
-diff -ruN gpui-pre-windows-0.3.11/src/gpui_windows.rs gpui-pre-windows-patched/src/gpui_windows.rs
---- gpui-pre-windows-0.3.11/src/gpui_windows.rs
+diff -ruN gpui-pre-windows-0.3.12/src/gpui_windows.rs gpui-pre-windows-patched/src/gpui_windows.rs
+--- gpui-pre-windows-0.3.12/src/gpui_windows.rs
 +++ gpui-pre-windows-patched/src/gpui_windows.rs
 @@ -38,6 +38,10 @@
  pub(crate) use window::*;

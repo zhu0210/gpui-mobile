@@ -1,4 +1,4 @@
-// Modified for gpui-pre (snapshot of zed@f816e1f): adapt device queues and sRGB detection to wgpu 30.0.1.
+// Modified for gpui-pre (snapshot of zed@d2a4fb6): adapt device queues and sRGB detection to wgpu 30.0.1.
 // Modified for gpui-pre-mobile: external textures drawn in place of an image's tile.
 use anyhow::{Context as _, Result};
 use etagere::{BucketedAtlasAllocator, size2};

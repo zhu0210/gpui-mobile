@@ -1,4 +1,4 @@
-// Modified for gpui-pre (snapshot of zed@f816e1f): adapt device queues and sRGB detection to wgpu 30.0.1.
+// Modified for gpui-pre (snapshot of zed@d2a4fb6): adapt device queues and sRGB detection to wgpu 30.0.1.
 // Modified for gpui-mobile `media`: DMA-BUF import on Linux, `window_context()`.
 #[cfg(not(target_family = "wasm"))]
 use crate::{WgpuRenderer, WgpuSurfaceConfig};

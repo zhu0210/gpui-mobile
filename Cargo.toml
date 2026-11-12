@@ -77,7 +77,7 @@ raw-window-handle = "0.6"
 image        = { version = "0.25", default-features = false, optional = true }
 
 # ── GPUI core crate (provides Platform trait, event types, geometry, etc.) ───
-gpui = { package = "gpui-pre", version = "=0.3.11", default-features = false }
+gpui = { package = "gpui-pre", version = "=0.3.12", default-features = false }
 
 # ── iOS ──────────────────────────────────────────────────────────────────────
 
@@ -102,7 +102,7 @@ objc2-metal         = "0.3"
 libc = "=0.2.189"
 
 # wgpu renderer (Metal backend on iOS/Android)
-gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.11", features = ["font-kit"] }
+gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.12", features = ["font-kit"] }
 
 # Text / font stack
 pathfinder_geometry = "0.5"
@@ -123,7 +123,7 @@ libc = { version = "0.2", optional = true }
 # Audio output for the FFmpeg backend; also covers macOS and Windows later.
 cpal = { version = "0.16", optional = true }
 # The window's wgpu context and the external-texture hook (`media`).
-gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.11", optional = true }
+gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.12", optional = true }
 
 # ── macOS and Windows (`media` with `ffmpeg`), on GPUI's own renderers ───────
 
@@ -139,7 +139,7 @@ objc2-core-video = { version = "0.3.2", optional = true, features = ["CVBuffer",
 [target.'cfg(target_os = "windows")'.dependencies]
 # The window's Direct3D 11 device and the external-texture hook (`media`): the vendored
 # `gpui-pre-windows` (see `[patch.crates-io]`), and the `windows` it uses.
-gpui_windows = { package = "gpui-pre-windows", version = "=0.3.11", optional = true }
+gpui_windows = { package = "gpui-pre-windows", version = "=0.3.12", optional = true }
 windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_System_Com"] }
 
 # ── Android ──────────────────────────────────────────────────────────────────
@@ -165,7 +165,7 @@ android_logger = "0.15"
 
 # wgpu renderer (Vulkan backend on Android)
 # Android uses Cosmic Text and system fonts; font-kit pulls in desktop Fontconfig.
-gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.11" }
+gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.12" }
 
 # TalkBack: exposes GPUI's AccessKit tree (accesskit 0.24, as gpui-pre).
 accesskit_android = "0.7.5"
@@ -177,11 +177,11 @@ uuid       = { version = "1", features = ["v5"] }
 # ── dev ──────────────────────────────────────────────────────────────────────
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.11", default-features = false, features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.12", default-features = false, features = ["test-support"] }
 
 # `examples/desktop_video.rs`: a desktop GPUI window.
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dev-dependencies]
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["font-kit", "wayland", "x11"] }
 env_logger = "0.11"
 
 [[example]]
@@ -200,14 +200,14 @@ strip         = true
 opt-level = 0
 debug     = true
 
-# `gpui-pre-wgpu` 0.3.11 with its headless renderer behind an `offscreen` feature
+# `gpui-pre-wgpu` 0.3.12 with its headless renderer behind an `offscreen` feature
 # instead of `test-support` / `bench-support`, a constructor that takes the wgpu
 # instance (iOS needs Metal), and methods that release its render target and
 # clear its sprite atlas between captures. Applications that enable `offscreen`
 # must patch it the same way.
 [patch.crates-io]
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
-# `gpui-pre-windows` 0.3.11 with the same external-texture hook in its Direct3D 11
+# `gpui-pre-windows` 0.3.12 with the same external-texture hook in its Direct3D 11
 # atlas and its device handed out (`media` on Windows). `vendor/README.md` has
 # how both are kept up with upstream.
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
