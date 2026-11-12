@@ -125,23 +125,17 @@ same way:
 gpui-pre-wgpu = { git = "https://github.com/longbridge/gpui-mobile" }
 ```
 
-## Video on the desktop
+## Video in the scene
 
-`media::VideoFrames` (the `ffmpeg` feature) also plays on Linux, macOS and
-Windows, decoding on the GPU and drawing the decoder's frames without copying
-them through memory: VA-API into wgpu on Linux, VideoToolbox pixel buffers
-through `Window::paint_surface` on macOS, and Direct3D 11 video decoding on
-GPUI's own device on Windows. Windows needs the vendored `gpui-pre-windows`
-(`vendor/README.md`), which an application patches in beside `gpui-pre-wgpu`:
-
-```toml
-[patch.crates-io]
-gpui-pre-windows = { git = "https://github.com/longbridge/gpui-mobile" }
-```
-
-`cargo run --example desktop_video --no-default-features --features ffmpeg --
-<file>` plays a file; `.github/workflows/desktop-video.yml` runs it on macOS and
-Windows.
+[gpui-media](https://github.com/zhu0210/gpui-media) plays video inside the
+GPUI scene (frames clip, round and layer like images) on Android and iOS as
+well as the desktops. On phones it uses this crate's
+`android::jni::app_visible`, `android::jni::platform`, `android::jni::with_env`,
+`ios::gpu_context` and `ios::util::nsstring`, and it draws through the
+external-texture hook of the vendored `gpui-pre-wgpu`
+(`set_external_texture`). An application using it patches `gpui-pre-wgpu` as
+above, from a gpui-mobile that carries the hook (`zhu0210/gpui-mobile`, until
+it is upstream); gpui-media's README has the lines.
 
 ## Screenshots
 
