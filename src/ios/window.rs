@@ -76,13 +76,12 @@ impl HasDisplayHandle for RawIosWindow {
 
 thread_local! {
     /// The Metal context of the last window created, for code outside the
-    /// renderer that draws with the same device (`media`).
+    /// renderer that draws with the same device (gpui-media's video frames).
     static GPU_CONTEXT: RefCell<Option<GpuContext>> = const { RefCell::new(None) };
 }
 
 /// The GPU context windows render with, once one exists. Main thread only.
-#[cfg_attr(not(feature = "media"), allow(dead_code))]
-pub(crate) fn gpu_context() -> Option<GpuContext> {
+pub fn gpu_context() -> Option<GpuContext> {
     GPU_CONTEXT.with(|context| context.borrow().clone())
 }
 

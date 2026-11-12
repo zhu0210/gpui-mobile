@@ -1262,9 +1262,9 @@ fn activity_is_finishing() -> Result<bool, String> {
 /// `MainEvent::Stop`.
 static APP_VISIBLE: AtomicBool = AtomicBool::new(true);
 
-/// Whether the app is visible; media playback pauses while it isn't.
-#[cfg_attr(not(feature = "media"), allow(dead_code))]
-pub(crate) fn app_visible() -> bool {
+/// Whether the app is visible (its Activity started); video players such as
+/// gpui-media's pause while it isn't.
+pub fn app_visible() -> bool {
     APP_VISIBLE.load(Ordering::Relaxed)
 }
 
