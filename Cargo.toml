@@ -15,7 +15,7 @@ readme = "README.md"
 default = ["url_launcher", "shared_preferences", "path_provider",
            "package_info", "device_info", "connectivity", "network_info", "vibration",
            "battery", "share", "sensors", "webview", "file_selector", "image_picker", "camera",
-           "permission_handler", "notifications", "location", "audio",
+           "permission_handler", "notifications", "location", "audio", "video_player",
            "clipboard", "local_auth", "in_app_review", "contacts", "maps_launcher",
            "calendar", "deeplink", "microphone", "maps", "media_session"]
 url_launcher = []
@@ -37,6 +37,7 @@ permission_handler = []
 notifications = []
 location = []
 audio = []
+video_player = []
 clipboard = []
 local_auth = []
 in_app_review = []
