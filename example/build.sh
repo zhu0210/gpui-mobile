@@ -437,20 +437,6 @@ build_android() {
 
     local jni_libs_dir="$ANDROID_GRADLE_DIR/app/src/main/jniLibs"
 
-    # FFmpeg (scripts/build-ffmpeg-android.sh) when FFMPEG_DIR points at it:
-    # the video screen gets FFmpeg sources and the libraries go into the APK.
-    local feature_flags=""
-    if [[ -n "${FFMPEG_DIR:-}" ]]; then
-        info "FFmpeg from $FFMPEG_DIR"
-        feature_flags="--features ffmpeg"
-        local ndk="${ANDROID_NDK_HOME:-$(ls -d "${ANDROID_HOME:-$HOME/Android/Sdk}"/ndk/* | sort -V | tail -1)}"
-        export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-        mkdir -p "$jni_libs_dir/${ndk_abi}"
-        cp "$FFMPEG_DIR"/lib/lib*.so "$jni_libs_dir/${ndk_abi}/"
-    else
-        rm -f "$jni_libs_dir/${ndk_abi}"/libav*.so "$jni_libs_dir/${ndk_abi}"/libsw*.so
-    fi
-
     cd "$EXAMPLES_DIR"
     cargo ndk \
         -t "$ndk_abi" \
@@ -458,7 +444,6 @@ build_android() {
         --platform 31 \
         build \
         $cargo_profile_flag \
-        $feature_flags \
         2>&1
 
     local so_path="$jni_libs_dir/${ndk_abi}/libgpui_mobile_example.so"

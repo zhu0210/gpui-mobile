@@ -23,6 +23,7 @@ pub(crate) struct PackagesState {
     pub notif_status: Option<String>,
     pub notif_counter: i32,
     pub audio_status: Option<String>,
+    pub video_status: Option<String>,
 }
 
 thread_local! {
@@ -1191,6 +1192,48 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
                             action_button("Info", BLUE, cx.listener(|_this, _, _, cx| {
                                 PACKAGES_STATE.with(|s| {
                                     s.borrow_mut().audio_status = Some("Audio API ready".into());
+                                });
+                                cx.notify();
+                            })),
+                        ),
+                )
+        });
+
+    // ── Video Player ─────────────────────────────────────────────────────────
+    root = root
+        .child(section_header("Video Player", sub_text))
+        .child({
+            let video_st = PACKAGES_STATE.with(|s| {
+                s.borrow().video_status.as_deref().unwrap_or("No player").to_string()
+            });
+            info_card(card_bg)
+                .child(kv_row("Status", &video_st, MAUVE, text_color, sub_text))
+                .child(divider_line(divider_color))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .p_3()
+                        .child(
+                            action_button("Create", MAUVE, cx.listener(|_this, _, _, cx| {
+                                PACKAGES_STATE.with(|s| {
+                                    let mut state = s.borrow_mut();
+                                    match gpui_mobile::packages::video_player::VideoPlayer::new() {
+                                        Ok(p) => {
+                                            state.video_status = Some("Player created".into());
+                                            std::mem::forget(p); // leak for demo simplicity
+                                        }
+                                        Err(e) => state.video_status = Some(format!("Error: {e}")),
+                                    }
+                                });
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            action_button("Info", GREEN, cx.listener(|_this, _, _, cx| {
+                                PACKAGES_STATE.with(|s| {
+                                    s.borrow_mut().video_status = Some("Video API ready".into());
                                 });
                                 cx.notify();
                             })),

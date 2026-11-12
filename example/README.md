@@ -19,7 +19,7 @@ the Rust bridge. The child GPUI controller uses UIKit containment, and layout
 changes propagate to the Metal surface and GPUI viewport.
 
 `GPUI_INITIAL_SCREEN` (`SIMCTL_CHILD_GPUI_INITIAL_SCREEN` through `simctl`)
-opens one screen directly, e.g. `native_video`.
+opens one screen directly, e.g. `video_player`.
 
 This example hosts one GPUI view for the application's lifetime. It does not
 yet provide an independently destroyable, multi-instance embedding API.
