@@ -1,14 +1,14 @@
 #!/bin/sh
-# Re-vendors gpui-pre-wgpu and gpui-pre-windows at gpui-pre version $1 from the
-# cargo registry (run `cargo fetch` with the new pins first), applies each
-# crate's patch and writes the patch again against the new version.
+# Re-vendors gpui-pre-wgpu at gpui-pre version $1 from the
+# cargo registry (run `cargo fetch` with the new pins first), applies its
+# patch and writes the patch again against the new version.
 # A hunk that no longer applies stops the script: fix it by hand in
 # vendor/<crate>, then run `vendor/update.sh <version> --repatch`.
 set -eu
 version=$1
 cd "$(dirname "$0")"
 vendor=$PWD
-for crate in gpui-pre-wgpu gpui-pre-windows; do
+for crate in gpui-pre-wgpu; do
     source=$(ls -d "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/"$crate-$version" | head -1)
     if [ "${2:-}" != --repatch ]; then
         rm -rf "$crate"

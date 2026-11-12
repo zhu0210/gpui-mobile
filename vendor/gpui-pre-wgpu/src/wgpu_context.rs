@@ -1,5 +1,5 @@
 // Modified for gpui-pre (snapshot of zed@d2a4fb6): adapt device queues and sRGB detection to wgpu 30.0.1.
-// Modified for gpui-mobile `media`: DMA-BUF import on Linux, `window_context()`.
+// Modified for gpui-mobile and gpui-media: DMA-BUF import on Linux, `window_context()`.
 #[cfg(not(target_family = "wasm"))]
 use crate::{WgpuRenderer, WgpuSurfaceConfig};
 #[cfg(not(target_family = "wasm"))]
@@ -190,7 +190,7 @@ impl WgpuContext {
     }
 
     /// The context windows last rendered with, for code outside the renderer
-    /// that draws into the same device (video frames, `gpui_mobile::media`).
+    /// that draws into the same device (video frames, gpui-media).
     /// Textures can't cross devices, so such code must use this one.
     #[cfg(not(target_family = "wasm"))]
     pub fn window_context() -> Option<Self> {
@@ -470,7 +470,7 @@ impl WgpuContext {
 
         let mut required_features = wgpu::Features::empty();
         // Video frames decoded by VA-API arrive as DMA-BUFs, 10-bit ones as
-        // 16-bit planes (`gpui_mobile::media`).
+        // 16-bit planes (gpui-media).
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             required_features |= adapter.features()
